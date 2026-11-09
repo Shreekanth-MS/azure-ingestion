@@ -1,0 +1,499 @@
+import os
+import json
+import re
+import time
+import io
+from typing import Optional
+from dotenv import load_dotenv
+from PIL import Image
+from google import genai
+from google.genai import types
+
+load_dotenv(override=True)
+
+PROJECTS_FILE = "projects_memory.json"
+
+
+def load_project_memories() -> dict:
+    """Loads long-term project knowledge and invariants."""
+    if os.path.exists(PROJECTS_FILE):
+        try:
+            with open(PROJECTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict) and data:
+                    return data
+        except Exception:
+            pass
+    return {
+        "New Project": {
+            "summary": "Enterprise multi-tenant cloud application workspace.",
+            "invariants": ["Tenant isolation and role-based permissions must be enforced."],
+            "personas": ["Super Admin", "Standard User"],
+            "learned_search_knowledge": []
+        }
+    }
+
+
+def register_new_project(project_name: str) -> dict:
+    """Explicitly creates and persists a brand-new project profile immediately."""
+    clean_name = project_name.strip()
+    memories = load_project_memories()
+    if clean_name not in memories:
+        memories[clean_name] = {
+            "summary": f"Enterprise architecture and QA workspace for {clean_name}.",
+            "invariants": [],
+            "personas": [],
+            "learned_search_knowledge": []
+        }
+        try:
+            with open(PROJECTS_FILE, "w", encoding="utf-8") as f:
+                json.dump(memories, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not write project memory: {e}")
+    return memories
+
+
+def save_project_memory(
+    project_name: str,
+    new_summary: str,
+    new_invariants: list[str],
+    new_personas: list[str],
+    new_search_learnings: list[str] = None
+):
+    """Appends discovered invariants, personas, and web search discoveries to the project profile."""
+    memories = load_project_memories()
+    if project_name not in memories:
+        memories[project_name] = {
+            "summary": new_summary,
+            "invariants": [],
+            "personas": [],
+            "learned_search_knowledge": []
+        }
+
+    existing = memories[project_name]
+    if new_summary and len(new_summary) > len(existing.get("summary", "")):
+        existing["summary"] = new_summary
+
+    combined_invariants = list(dict.fromkeys(existing.get("invariants", []) + (new_invariants or [])))
+    combined_personas = list(dict.fromkeys(existing.get("personas", []) + (new_personas or [])))
+    combined_search_learnings = list(
+        dict.fromkeys(existing.get("learned_search_knowledge", []) + (new_search_learnings or []))
+    )
+
+    existing["invariants"] = combined_invariants[-25:]
+    existing["personas"] = combined_personas[-10:]
+    existing["learned_search_knowledge"] = combined_search_learnings[-20:]
+
+    memories[project_name] = existing
+
+    try:
+        with open(PROJECTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(memories, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not persist project memory: {e}")
+
+
+class KeyRotator:
+    """Manages round-robin rotation across multiple Google Gemini API keys."""
+    def __init__(self, keys: list[str]):
+        self.keys = [k.strip() for k in keys if k.strip()]
+        self.current_idx = 0
+        if not self.keys:
+            raise ValueError("No valid GEMINI_API_KEYS found in environment or secrets.")
+
+    def get_client(self) -> genai.Client:
+        return genai.Client(api_key=self.keys[self.current_idx])
+
+    def rotate(self) -> genai.Client:
+        self.current_idx = (self.current_idx + 1) % len(self.keys)
+        masked_key = f"...{self.keys[self.current_idx][-6:]}"
+        print(f"Switched to API key [{self.current_idx + 1}/{len(self.keys)}] ({masked_key})")
+        return self.get_client()
+
+
+def sanitize_input(text: str) -> str:
+    """Masks customer PII, emails, internal IP addresses, API secrets, and DB strings."""
+    if not text:
+        return ""
+    text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[REDACTED_EMAIL]', text)
+    text = re.sub(r'\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3})\b', '[INTERNAL_IP]', text)
+    text = re.sub(r'(bearer\s+[A-Za-z0-9_\-\.]{20,}|ghp_[A-Za-z0-9]{36}|AIza[0-9A-Za-z-_]{35})', '[REDACTED_SECRET]', text, flags=re.IGNORECASE)
+    text = re.sub(r'(postgres|mysql|mongodb|redis):\/\/[^\s]+', '[REDACTED_DB_URI]', text, flags=re.IGNORECASE)
+    return text
+
+
+def format_for_azure_clipboard(ticket_data: dict, work_item_type: str) -> dict:
+    """Formats JSON output into Azure DevOps-compatible HTML blocks for clean copy-pasting."""
+    title = ticket_data.get("title_suggestion", "Architectural Requirement")
+    arch_summary = ticket_data.get("architecture_summary", "")
+    invariants = ticket_data.get("system_invariants", [])
+    stories = ticket_data.get("reciprocal_user_stories", [])
+    scenarios = ticket_data.get("adversarial_edge_cases_and_test_scenarios", [])
+    search_insights = ticket_data.get("external_search_learnings", [])
+
+    insights_html = ""
+    if search_insights:
+        insights_html = "<h3>Learned External Standards / Findings</h3><ul>" + "".join([f"<li>{x}</li>" for x in search_insights]) + "</ul>"
+
+    if work_item_type in ["User Story", "Feature", "Epic"]:
+        desc_lines = [
+            "<h3>Architecture & Flow Boundaries</h3>",
+            f"<p>{arch_summary}</p>",
+            "<h3>Core System Invariants</h3>",
+            "<ul>" + "".join([f"<li>{inv}</li>" for inv in invariants]) + "</ul>",
+            insights_html
+        ]
+        ac_lines = ["<h3>Acceptance Criteria & Reciprocal Stories</h3>"]
+        for s in stories:
+            ac_lines.append(
+                f"<p><strong>As a</strong> {s.get('as_a')}<br/>"
+                f"<strong>I want to</strong> {s.get('i_want')}<br/>"
+                f"<strong>So that</strong> {s.get('so_that')}</p>"
+                f"<blockquote><pre>{s.get('acceptance_criteria')}</pre></blockquote><hr/>"
+            )
+        return {
+            "title": title,
+            "field_1_name": "Description",
+            "field_1_content": "\n".join([x for x in desc_lines if x]),
+            "field_2_name": "Acceptance Criteria",
+            "field_2_content": "\n".join(ac_lines)
+        }
+
+    elif work_item_type == "Bug":
+        repro_lines = [
+            "<h3>Architectural Failure Context</h3>",
+            f"<p>{arch_summary}</p>",
+            "<h3>Reproduction & Adversarial Trigger Scenarios</h3>"
+        ]
+        for sc in scenarios:
+            repro_lines.append(
+                f"<h4>[{sc.get('scenario_type')}] {sc.get('title')}</h4>"
+                f"<p><strong>Preconditions:</strong> {sc.get('preconditions')}<br/>"
+                f"<strong>Trigger Action:</strong> {sc.get('action')}<br/>"
+                f"<strong>Expected Defensive Behavior:</strong> {sc.get('expected_behavior')}</p>"
+            )
+        inv_lines = [
+            "<h3>Violated System Invariants</h3>",
+            "<ul>" + "".join([f"<li>{inv}</li>" for inv in invariants]) + "</ul>",
+            insights_html
+        ]
+        return {
+            "title": f"[Defect] {title}",
+            "field_1_name": "Repro Steps",
+            "field_1_content": "\n".join(repro_lines),
+            "field_2_name": "System Info / Constraints",
+            "field_2_content": "\n".join([x for x in inv_lines if x])
+        }
+
+    elif work_item_type == "Test Case":
+        precondition_lines = [
+            f"<h3>Objective & Test Scope</h3><p>{arch_summary}</p>",
+            "<h3>Preconditions & Guardrail Invariants</h3>",
+            "<ul>" + "".join([f"<li>{inv}</li>" for inv in invariants]) + "</ul>",
+            insights_html
+        ]
+        steps_lines = [
+            "<h3>Execution Sequence & Verification Grid</h3>",
+            "<table border='1' cellpadding='6' style='border-collapse:collapse; width:100%;'>",
+            "<tr style='background-color:#f0f0f0;'><th>#</th><th>Trigger / Action</th><th>Expected Defensive Result</th></tr>"
+        ]
+        for idx, sc in enumerate(scenarios, 1):
+            steps_lines.append(
+                f"<tr>"
+                f"<td><strong>{idx}</strong></td>"
+                f"<td><strong>{sc.get('title')}</strong><br/>{sc.get('action')}</td>"
+                f"<td>{sc.get('expected_behavior')}</td>"
+                f"</tr>"
+            )
+        steps_lines.append("</table>")
+        return {
+            "title": f"[QA] {title}",
+            "field_1_name": "Summary & Preconditions",
+            "field_1_content": "\n".join([x for x in precondition_lines if x]),
+            "field_2_name": "Steps to Run",
+            "field_2_content": "\n".join(steps_lines)
+        }
+
+    default_content = [
+        f"<h3>Summary</h3><p>{arch_summary}</p>",
+        "<h3>Invariants & Technical Scope</h3>",
+        "<ul>" + "".join([f"<li>{inv}</li>" for inv in invariants]) + "</ul>",
+        insights_html
+    ]
+    return {
+        "title": title,
+        "field_1_name": "Description",
+        "field_1_content": "\n".join([x for x in default_content if x]),
+        "field_2_name": "Technical Notes",
+        "field_2_content": "<p>Review schema boundaries and edge cases prior to implementation.</p>"
+    }
+
+
+def ingest_raw_gemini_text(raw_text: str, project_name: str, work_item_type: str = "Test Case") -> dict:
+    """
+    Parses unstructured text or JSON pasted directly from a Gemini web session,
+    absorbs learnings into project memory, and formats clean HTML for Azure DevOps.
+    """
+    clean_text = raw_text.strip()
+
+    # 1. Check if input is valid JSON
+    parsed_json = None
+    if "{" in clean_text and "}" in clean_text:
+        match = re.search(r"(\{.*\})", clean_text, re.DOTALL)
+        if match:
+            try:
+                parsed_json = json.loads(match.group(1))
+            except Exception:
+                pass
+
+    if parsed_json and isinstance(parsed_json, dict):
+        save_project_memory(
+            project_name=project_name,
+            new_summary=parsed_json.get("architecture_summary", ""),
+            new_invariants=parsed_json.get("system_invariants", []),
+            new_personas=parsed_json.get("involved_personas", []),
+            new_search_learnings=parsed_json.get("external_search_learnings", [])
+        )
+        return format_for_azure_clipboard(parsed_json, work_item_type)
+
+    # 2. Heuristic extraction for plain markdown
+    lines = [line.strip() for line in clean_text.splitlines() if line.strip()]
+
+    title = f"[{work_item_type}] {project_name} - Integration Workflow"
+    for line in lines[:5]:
+        if any(line.lower().startswith(p) for p in ["title:", "# ", "**title**:", "scenario:"]):
+            title = re.sub(r"^(#+|\*\*title\*\*:?|title:?)\s*", "", line, flags=re.IGNORECASE).strip()
+            break
+
+    discovered_invariants = []
+    for line in lines:
+        if line.startswith(("-", "*", "•")) and any(k in line.lower() for k in ["must", "invariant", "rule", "required", "ensure"]):
+            clean_inv = re.sub(r"^[-*•]\s*", "", line).strip()
+            discovered_invariants.append(clean_inv)
+
+    html_content = re.sub(r"^### (.*)", r"<h3>\1</h3>", clean_text, flags=re.MULTILINE)
+    html_content = re.sub(r"^## (.*)", r"<h2>\1</h2>", html_content, flags=re.MULTILINE)
+    html_content = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", html_content)
+    html_content = html_content.replace("\n", "<br/>")
+
+    if discovered_invariants:
+        save_project_memory(
+            project_name=project_name,
+            new_summary=f"Pasted off-grid knowledge for {project_name}.",
+            new_invariants=discovered_invariants,
+            new_personas=[]
+        )
+
+    return {
+        "title": title,
+        "field_1_name": "Description / Summary",
+        "field_1_content": f"<h3>Ingested Analysis ({project_name})</h3>\n<p>{html_content}</p>",
+        "field_2_name": "Steps & Verification",
+        "field_2_content": f"<h3>Extracted Steps</h3>\n<p>{html_content}</p>"
+    }
+
+
+class DomainBrain:
+    def __init__(self):
+        keys_env = ""
+        try:
+            import streamlit as st
+            if "GEMINI_API_KEYS" in st.secrets:
+                keys_env = st.secrets["GEMINI_API_KEYS"]
+        except Exception:
+            pass
+
+        if not keys_env:
+            keys_env = os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY") or ""
+
+        keys_list = [k.strip() for k in keys_env.split(",") if k.strip()]
+        if not keys_list:
+            raise ValueError("GEMINI_API_KEYS not configured in environment or Streamlit secrets.")
+
+        self.rotator = KeyRotator(keys_list)
+
+    def think_hybrid(
+        self,
+        requirement: str,
+        project_name: str = "New Project",
+        mode: str = "User Story",
+        images: Optional[list[Image.Image]] = None,
+        boundaries: str = "",
+        enable_web_search: bool = True
+    ) -> dict:
+        clean_req = sanitize_input(requirement)
+        clean_boundaries = sanitize_input(boundaries)
+
+        memories = load_project_memories()
+        proj_mem = memories.get(project_name, {})
+        known_summary = proj_mem.get("summary", "Enterprise cloud SaaS system.")
+        known_invariants = "\n- ".join(proj_mem.get("invariants", []))
+        known_personas = ", ".join(proj_mem.get("personas", []))
+        known_search = "\n- ".join(proj_mem.get("learned_search_knowledge", []))
+
+        memory_context = f"""
+INTERNAL BRAIN MEMORY FOR PROJECT [{project_name}]:
+- Architecture Summary: {known_summary}
+- Known Personas: {known_personas if known_personas else "Super Admin, Standard User"}
+- Established System Invariants:
+- {known_invariants if known_invariants else "Standard enterprise RBAC and tenant isolation."}
+- Previous Search Learnings:
+- {known_search if known_search else "None recorded yet"}
+"""
+
+        has_images = bool(images and len(images) > 0)
+
+        active_tools = []
+        search_instruction = ""
+        if enable_web_search and not has_images:
+            active_tools = [{"google_search": {}}]
+            search_instruction = """
+SEARCH PRIORITY & LEARNING RULE:
+1. Brain First: Check 'INTERNAL BRAIN MEMORY' before searching.
+2. Search Fallback: If external protocols, RFCs, or unknown 3rd-party APIs are referenced, use Google Search and record key rules under 'external_search_learnings'.
+"""
+        elif has_images:
+            search_instruction = """
+PRIVACY BOUNDARY: Visual screenshots provided. Base all reasoning strictly on local UI context. Web Search is disabled.
+"""
+
+        system_instruction = f"""
+You are an Enterprise SaaS Architect & Principal QA Strategist.
+ACTIVE WORKSPACE: {project_name}
+TARGET ARTIFACT: {mode}
+
+{memory_context}
+
+{search_instruction}
+
+NEGATIVE BOUNDARIES & INVARIANTS:
+{clean_boundaries}
+
+INSTRUCTIONS:
+1. Brain First: Treat project memory and inputs as the single source of truth.
+2. Macroscopic: Consolidate multi-tab flows into a unified test lifecycle without micro-interaction clicks.
+3. Return strictly valid JSON matching the schema.
+"""
+
+        prompt_text = f"""
+{system_instruction}
+
+CONTEXT / REQUIREMENT:
+{clean_req if clean_req else "Analyze attached screen(s) under declared project invariants."}
+
+OUTPUT JSON SCHEMA:
+{{
+  "mode": "{mode}",
+  "title_suggestion": "Concise standard title for the ticket",
+  "architecture_summary": "Architecture summary and cross-tab/data flow boundaries",
+  "involved_personas": ["Persona 1", "Persona 2"],
+  "external_search_learnings": [
+    "Key standards, API behaviors, or compliance rules newly learned from Google Search"
+  ],
+  "reciprocal_user_stories": [
+    {{
+      "persona": "Role",
+      "as_a": "Role",
+      "i_want": "Action or capability",
+      "so_that": "Business value",
+      "acceptance_criteria": "Given/When/Then criteria"
+    }}
+  ],
+  "adversarial_edge_cases_and_test_scenarios": [
+    {{
+      "scenario_type": "Boundary / Concurrency / State Invalidation",
+      "title": "Scenario title",
+      "preconditions": "Initial system state",
+      "action": "Triggering action across workflow",
+      "expected_behavior": "Defensive architectural response"
+    }}
+  ],
+  "system_invariants": [
+    "Non-negotiable business rules"
+  ]
+}}
+"""
+
+        contents = []
+        if has_images:
+            for img in images:
+                clean_img = img.convert("RGB")
+                max_dim = 960
+                if max(clean_img.size) > max_dim:
+                    clean_img.thumbnail((max_dim, max_dim), Image.Resampling.BILINEAR)
+
+                buf = io.BytesIO()
+                clean_img.save(buf, format="JPEG", quality=65, optimize=True)
+                contents.append(
+                    types.Part.from_bytes(
+                        data=buf.getvalue(),
+                        mime_type="image/jpeg"
+                    )
+                )
+
+        contents.append(prompt_text)
+
+        # Multi-model pool to survive 503 high-demand spikes
+        candidate_models = [
+            "gemini-3.8-flash",
+            "gemini-3.8-pro",
+            "gemini-2.5-pro"
+        ]
+        errors_logged = []
+
+        for attempt in range(len(self.rotator.keys)):
+            client = self.rotator.get_client()
+
+            for model_name in candidate_models:
+                try:
+                    config_args = {
+                        "temperature": 0.1,
+                        "max_output_tokens": 4096,
+                        "response_mime_type": "application/json"
+                    }
+                    if active_tools:
+                        config_args["tools"] = active_tools
+
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=contents,
+                        config=types.GenerateContentConfig(**config_args)
+                    )
+
+                    raw_text = (response.text or "").strip()
+
+                    if raw_text.startswith("```"):
+                        raw_text = re.sub(r"^```[a-zA-Z]*\n", "", raw_text)
+                        raw_text = re.sub(r"\n```$", "", raw_text)
+
+                    json_match = re.search(r"(\{.*\})", raw_text, re.DOTALL)
+                    if json_match:
+                        raw_text = json_match.group(1)
+
+                    result_json = json.loads(raw_text)
+
+                    save_project_memory(
+                        project_name=project_name,
+                        new_summary=result_json.get("architecture_summary", ""),
+                        new_invariants=result_json.get("system_invariants", []),
+                        new_personas=result_json.get("involved_personas", []),
+                        new_search_learnings=result_json.get("external_search_learnings", [])
+                    )
+
+                    return result_json
+
+                except Exception as e:
+                    err_str = f"[{model_name} / Key {self.rotator.current_idx + 1}]: {str(e)}"
+                    errors_logged.append(err_str)
+
+                    if any(x in str(e) for x in ["503", "UNAVAILABLE", "404", "NOT_FOUND"]):
+                        continue
+
+                    if any(x in str(e) for x in ["429", "RESOURCE_EXHAUSTED"]):
+                        self.rotator.rotate()
+                        time.sleep(1.0)
+                        break
+
+                    raise e
+
+        raise RuntimeError("Generation failed across all candidate models. Details:\n" + "\n".join(errors_logged))

@@ -1,0 +1,17 @@
+{
+  "New Project": {
+    "summary": "Initial architecture workspace. Multi-tab workflows, role boundaries, and end-to-end business lifecycles.",
+    "invariants": [
+      "Macroscopic big-picture view: omit trivial micro-interaction click steps.",
+      "Consolidate multiple related tabs into a single unified end-to-end lifecycle scenario.",
+      "Strict RBAC validation: isolate permissions across administrative and standard roles.",
+      "Cross-tab state persistence: ensure upstream modifications propagate without data loss."
+    ],
+    "personas": [
+      "Super Admin",
+      "System Admin",
+      "Standard User"
+    ],
+    "learned_search_knowledge": []
+  }
+}
