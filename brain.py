@@ -3,7 +3,9 @@ import json
 import re
 import time
 import io
+import base64
 from typing import Optional
+import requests
 from dotenv import load_dotenv
 from PIL import Image
 from google import genai
@@ -13,7 +15,21 @@ load_dotenv(override=True)
 
 PROJECTS_FILE = "projects_memory.json"
 
+# All 7 supported Azure DevOps Work Item types
+ALL_AZURE_WITS = [
+    "Bug",
+    "Epic",
+    "Feature",
+    "Issue",
+    "Task",
+    "Test Case",
+    "User Story"
+]
 
+
+# ----------------------------------------------------------------------
+# 1. PERSISTENT MULTI-PROJECT MEMORY
+# ----------------------------------------------------------------------
 def load_project_memories() -> dict:
     """Loads long-term project knowledge and invariants."""
     if os.path.exists(PROJECTS_FILE):
@@ -35,7 +51,7 @@ def load_project_memories() -> dict:
 
 
 def register_new_project(project_name: str) -> dict:
-    """Explicitly creates and persists a brand-new project profile immediately."""
+    """Explicitly creates and persists a new project profile immediately."""
     clean_name = project_name.strip()
     memories = load_project_memories()
     if clean_name not in memories:
@@ -93,26 +109,11 @@ def save_project_memory(
         print(f"Warning: Could not persist project memory: {e}")
 
 
-class KeyRotator:
-    """Manages round-robin rotation across multiple Google Gemini API keys."""
-    def __init__(self, keys: list[str]):
-        self.keys = [k.strip() for k in keys if k.strip()]
-        self.current_idx = 0
-        if not self.keys:
-            raise ValueError("No valid GEMINI_API_KEYS found in environment or secrets.")
-
-    def get_client(self) -> genai.Client:
-        return genai.Client(api_key=self.keys[self.current_idx])
-
-    def rotate(self) -> genai.Client:
-        self.current_idx = (self.current_idx + 1) % len(self.keys)
-        masked_key = f"...{self.keys[self.current_idx][-6:]}"
-        print(f"Switched to API key [{self.current_idx + 1}/{len(self.keys)}] ({masked_key})")
-        return self.get_client()
-
-
+# ----------------------------------------------------------------------
+# 2. SANITIZATION & AZURE FORMATTING
+# ----------------------------------------------------------------------
 def sanitize_input(text: str) -> str:
-    """Masks customer PII, emails, internal IP addresses, API secrets, and DB strings."""
+    """Masks emails, internal IP addresses, API secrets, and DB connection strings."""
     if not text:
         return ""
     text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[REDACTED_EMAIL]', text)
@@ -135,7 +136,7 @@ def format_for_azure_clipboard(ticket_data: dict, work_item_type: str) -> dict:
     if search_insights:
         insights_html = "<h3>Learned External Standards / Findings</h3><ul>" + "".join([f"<li>{x}</li>" for x in search_insights]) + "</ul>"
 
-    if work_item_type in ["User Story", "Feature", "Epic"]:
+    if work_item_type in ["User Story", "Feature", "Epic", "Issue"]:
         desc_lines = [
             "<h3>Architecture & Flow Boundaries</h3>",
             f"<p>{arch_summary}</p>",
@@ -151,12 +152,32 @@ def format_for_azure_clipboard(ticket_data: dict, work_item_type: str) -> dict:
                 f"<strong>So that</strong> {s.get('so_that')}</p>"
                 f"<blockquote><pre>{s.get('acceptance_criteria')}</pre></blockquote><hr/>"
             )
+        prefix = f"[{work_item_type}] " if work_item_type in ["Feature", "Epic", "Issue"] else ""
         return {
-            "title": title,
+            "title": f"{prefix}{title}",
             "field_1_name": "Description",
             "field_1_content": "\n".join([x for x in desc_lines if x]),
             "field_2_name": "Acceptance Criteria",
             "field_2_content": "\n".join(ac_lines)
+        }
+
+    elif work_item_type == "Task":
+        task_desc = [
+            f"<h3>Task Objective</h3><p>{arch_summary}</p>",
+            "<h3>System Invariants & Technical Rules</h3>",
+            "<ul>" + "".join([f"<li>{inv}</li>" for inv in invariants]) + "</ul>",
+            insights_html
+        ]
+        task_steps = ["<h3>Implementation & Verification Tasks</h3><ol>"]
+        for sc in scenarios:
+            task_steps.append(f"<li><strong>{sc.get('title')}</strong>: {sc.get('action')} &rarr; <em>{sc.get('expected_behavior')}</em></li>")
+        task_steps.append("</ol>")
+        return {
+            "title": f"[Task] {title}",
+            "field_1_name": "Description",
+            "field_1_content": "\n".join([x for x in task_desc if x]),
+            "field_2_name": "Implementation Steps",
+            "field_2_content": "\n".join(task_steps)
         }
 
     elif work_item_type == "Bug":
@@ -178,7 +199,7 @@ def format_for_azure_clipboard(ticket_data: dict, work_item_type: str) -> dict:
             insights_html
         ]
         return {
-            "title": f"[Defect] {title}",
+            "title": f"[Bug] {title}",
             "field_1_name": "Repro Steps",
             "field_1_content": "\n".join(repro_lines),
             "field_2_name": "System Info / Constraints",
@@ -207,7 +228,7 @@ def format_for_azure_clipboard(ticket_data: dict, work_item_type: str) -> dict:
             )
         steps_lines.append("</table>")
         return {
-            "title": f"[QA] {title}",
+            "title": f"[Test Case] {title}",
             "field_1_name": "Summary & Preconditions",
             "field_1_content": "\n".join([x for x in precondition_lines if x]),
             "field_2_name": "Steps to Run",
@@ -230,13 +251,9 @@ def format_for_azure_clipboard(ticket_data: dict, work_item_type: str) -> dict:
 
 
 def ingest_raw_gemini_text(raw_text: str, project_name: str, work_item_type: str = "Test Case") -> dict:
-    """
-    Parses unstructured text or JSON pasted directly from a Gemini web session,
-    absorbs learnings into project memory, and formats clean HTML for Azure DevOps.
-    """
+    """Parses unstructured text or JSON pasted directly from a Gemini web session."""
     clean_text = raw_text.strip()
 
-    # 1. Check if input is valid JSON
     parsed_json = None
     if "{" in clean_text and "}" in clean_text:
         match = re.search(r"(\{.*\})", clean_text, re.DOTALL)
@@ -256,7 +273,6 @@ def ingest_raw_gemini_text(raw_text: str, project_name: str, work_item_type: str
         )
         return format_for_azure_clipboard(parsed_json, work_item_type)
 
-    # 2. Heuristic extraction for plain markdown
     lines = [line.strip() for line in clean_text.splitlines() if line.strip()]
 
     title = f"[{work_item_type}] {project_name} - Integration Workflow"
@@ -293,6 +309,103 @@ def ingest_raw_gemini_text(raw_text: str, project_name: str, work_item_type: str
     }
 
 
+# ----------------------------------------------------------------------
+# 3. AZURE DEVOPS REST API INTEGRATION
+# ----------------------------------------------------------------------
+def get_azure_auth_headers(pat: str) -> dict:
+    b64_pat = base64.b64encode(f":{pat}".encode("utf-8")).decode("utf-8")
+    return {
+        "Authorization": f"Basic {b64_pat}",
+        "Content-Type": "application/json"
+    }
+
+
+def fetch_azure_projects(org_name: str, pat: str) -> list[str]:
+    """Retrieves list of project names accessible by the given Azure PAT."""
+    clean_org = org_name.strip().rstrip("/").split("/")[-1]
+    url = f"https://dev.azure.com/{clean_org}/_apis/projects?api-version=7.1-preview.4"
+    try:
+        res = requests.get(url, headers=get_azure_auth_headers(pat), timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            return [p["name"] for p in data.get("value", [])]
+        return []
+    except Exception as e:
+        print(f"Error fetching Azure DevOps projects: {e}")
+        return []
+
+
+def create_azure_work_item(
+    org_name: str,
+    project: str,
+    work_item_type: str,
+    title: str,
+    field_1_name: str,
+    field_1_content: str,
+    field_2_name: str,
+    field_2_content: str,
+    pat: str
+) -> dict:
+    """Creates a work item across all 7 types via REST API and returns item ID and web URL."""
+    clean_org = org_name.strip().rstrip("/").split("/")[-1]
+    wit_clean = work_item_type.replace(" ", "%20")
+    url = f"https://dev.azure.com/{clean_org}/{project}/_apis/wit/workitems/${wit_clean}?api-version=7.1"
+
+    b64_pat = base64.b64encode(f":{pat}".encode("utf-8")).decode("utf-8")
+    patch_headers = {
+        "Authorization": f"Basic {b64_pat}",
+        "Content-Type": "application/json-patch+json"
+    }
+
+    patch_doc = [
+        {"op": "add", "path": "/fields/System.Title", "value": title}
+    ]
+
+    if work_item_type in ["User Story", "Feature", "Epic", "Issue"]:
+        patch_doc.append({"op": "add", "path": "/fields/System.Description", "value": field_1_content})
+        patch_doc.append({"op": "add", "path": "/fields/Microsoft.VSTS.Common.AcceptanceCriteria", "value": field_2_content})
+    elif work_item_type == "Bug":
+        patch_doc.append({"op": "add", "path": "/fields/Microsoft.VSTS.TCM.ReproSteps", "value": field_1_content})
+        patch_doc.append({"op": "add", "path": "/fields/Microsoft.VSTS.TCM.SystemInfo", "value": field_2_content})
+    elif work_item_type == "Test Case":
+        patch_doc.append({"op": "add", "path": "/fields/System.Description", "value": field_1_content})
+        patch_doc.append({"op": "add", "path": "/fields/Microsoft.VSTS.Common.AcceptanceCriteria", "value": field_2_content})
+    elif work_item_type == "Task":
+        patch_doc.append({"op": "add", "path": "/fields/System.Description", "value": f"{field_1_content}<hr/>{field_2_content}"})
+    else:
+        patch_doc.append({"op": "add", "path": "/fields/System.Description", "value": f"{field_1_content}<hr/>{field_2_content}"})
+
+    res = requests.post(url, headers=patch_headers, json=patch_doc, timeout=15)
+
+    if res.status_code in [200, 201]:
+        res_data = res.json()
+        item_id = res_data.get("id")
+        web_url = res_data.get("_links", {}).get("html", {}).get("href", f"https://dev.azure.com/{clean_org}/{project}/_workitems/edit/{item_id}")
+        return {"success": True, "id": item_id, "url": web_url}
+    else:
+        return {"success": False, "error": f"Status {res.status_code}: {res.text}"}
+
+
+# ----------------------------------------------------------------------
+# 4. KEY ROTATOR & GEMINI ENGINE
+# ----------------------------------------------------------------------
+class KeyRotator:
+    def __init__(self, keys: list[str]):
+        self.keys = [k.strip() for k in keys if k.strip()]
+        self.current_idx = 0
+        if not self.keys:
+            raise ValueError("No valid GEMINI_API_KEYS found.")
+
+    def get_client(self) -> genai.Client:
+        return genai.Client(api_key=self.keys[self.current_idx])
+
+    def rotate(self) -> genai.Client:
+        self.current_idx = (self.current_idx + 1) % len(self.keys)
+        masked_key = f"...{self.keys[self.current_idx][-6:]}"
+        print(f"Switched to API key [{self.current_idx + 1}/{len(self.keys)}] ({masked_key})")
+        return self.get_client()
+
+
 class DomainBrain:
     def __init__(self):
         keys_env = ""
@@ -308,7 +421,7 @@ class DomainBrain:
 
         keys_list = [k.strip() for k in keys_env.split(",") if k.strip()]
         if not keys_list:
-            raise ValueError("GEMINI_API_KEYS not configured in environment or Streamlit secrets.")
+            raise ValueError("GEMINI_API_KEYS not configured in environment or secrets.")
 
         self.rotator = KeyRotator(keys_list)
 
@@ -316,7 +429,7 @@ class DomainBrain:
         self,
         requirement: str,
         project_name: str = "New Project",
-        mode: str = "User Story",
+        mode: str = "Test Case",
         images: Optional[list[Image.Image]] = None,
         boundaries: str = "",
         enable_web_search: bool = True
@@ -350,7 +463,7 @@ INTERNAL BRAIN MEMORY FOR PROJECT [{project_name}]:
             search_instruction = """
 SEARCH PRIORITY & LEARNING RULE:
 1. Brain First: Check 'INTERNAL BRAIN MEMORY' before searching.
-2. Search Fallback: If external protocols, RFCs, or unknown 3rd-party APIs are referenced, use Google Search and record key rules under 'external_search_learnings'.
+2. Search Fallback: If external protocols or unknown 3rd-party APIs are referenced, use Google Search and record key rules under 'external_search_learnings'.
 """
         elif has_images:
             search_instruction = """
@@ -433,7 +546,6 @@ OUTPUT JSON SCHEMA:
 
         contents.append(prompt_text)
 
-        # Multi-model pool to survive 503 high-demand spikes
         candidate_models = [
             "gemini-3.8-flash",
             "gemini-3.8-pro",

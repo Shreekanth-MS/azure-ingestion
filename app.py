@@ -11,11 +11,14 @@ from brain import (
     format_for_azure_clipboard,
     load_project_memories,
     register_new_project,
-    ingest_raw_gemini_text
+    ingest_raw_gemini_text,
+    fetch_azure_projects,
+    create_azure_work_item,
+    ALL_AZURE_WITS
 )
 
 st.set_page_config(
-    page_title="Enterprise QA & Architecture Workbench",
+    page_title="Enterprise QA & Azure Ingestion Engine",
     page_icon="🛡️",
     layout="wide"
 )
@@ -28,6 +31,9 @@ if "clipboard_images" not in st.session_state:
 
 if "uploaded_image_cache" not in st.session_state:
     st.session_state.uploaded_image_cache = []
+
+if "azure_projects" not in st.session_state:
+    st.session_state.azure_projects = []
 
 # ---------------------------------------------------------
 # SECURITY: Gatekeeper Authentication
@@ -63,7 +69,60 @@ if not check_password():
     st.stop()
 
 # ---------------------------------------------------------
-# PROJECT SELECTION & PERSISTENT MEMORY
+# AZURE DEVOPS SIDEBAR CONNECTION
+# ---------------------------------------------------------
+with st.sidebar:
+    st.markdown("### ☁️ Azure DevOps Integration")
+    st.caption("Connect your Azure organization to discover projects and push items directly.")
+
+    default_org = ""
+    default_pat = ""
+    try:
+        if "AZURE_ORG" in st.secrets:
+            default_org = st.secrets["AZURE_ORG"]
+        if "AZURE_PAT" in st.secrets:
+            default_pat = st.secrets["AZURE_PAT"]
+    except Exception:
+        pass
+
+    azure_org_input = st.text_input(
+        "Azure Org Name / URL",
+        value=default_org or os.getenv("AZURE_ORG", ""),
+        placeholder="e.g. MyEnterpriseOrg",
+        help="Your Azure DevOps organization name ([dev.azure.com/YourOrgName](https://dev.azure.com/YourOrgName))"
+    )
+
+    azure_pat_input = st.text_input(
+        "Personal Access Token (PAT)",
+        value=default_pat or os.getenv("AZURE_PAT", ""),
+        type="password",
+        help="PAT with Work Items (Read, write, & manage) permissions"
+    )
+
+    if st.button("🔄 Connect & Fetch Azure Projects", use_container_width=True):
+        if azure_org_input and azure_pat_input:
+            with st.spinner("Connecting to Azure DevOps REST API..."):
+                projs = fetch_azure_projects(azure_org_input, azure_pat_input)
+                if projs:
+                    st.session_state.azure_projects = projs
+                    st.success(f"Connected! Found {len(projs)} project(s).")
+                else:
+                    st.error("Could not fetch projects. Check your Organization name and PAT permissions.")
+        else:
+            st.warning("Please provide both Azure Org and PAT.")
+
+    if st.session_state.azure_projects:
+        azure_target_project = st.selectbox(
+            "📌 Destination Azure Project",
+            st.session_state.azure_projects,
+            key="azure_target_project_select"
+        )
+    else:
+        azure_target_project = None
+        st.info("Provide your PAT above to select destination projects.")
+
+# ---------------------------------------------------------
+# LOCAL PROJECT WORKSPACE SELECTION & PERSISTENT MEMORY
 # ---------------------------------------------------------
 project_memories = load_project_memories()
 project_list = list(project_memories.keys())
@@ -82,7 +141,7 @@ with col_proj_sel:
         else 0
     )
     selected_option = st.selectbox(
-        "📁 Active Project Workspace (Remembers Previous Learnings)",
+        "📁 Local Learning Memory Profile",
         dropdown_options,
         index=current_idx,
         key="project_dropdown_widget"
@@ -90,7 +149,7 @@ with col_proj_sel:
 
 if selected_option == "➕ [Add New Project]":
     with col_proj_new:
-        new_proj_name = st.text_input("Enter Project Name", placeholder="e.g., Billing Service", key="new_proj_input_box")
+        new_proj_name = st.text_input("Enter Project Name", placeholder="e.g., DentalPortal", key="new_proj_input_box")
         if st.button("Create Project Profile", type="primary", use_container_width=True):
             if new_proj_name.strip():
                 clean_name = new_proj_name.strip()
@@ -110,23 +169,110 @@ personas_count = len(proj_data.get("personas", []))
 search_learnings_count = len(proj_data.get("learned_search_knowledge", []))
 
 st.caption(
-    f"🧠 **Active Workspace:** `{active_project_name}` — "
+    f"🧠 **Active Memory Profile:** `{active_project_name}` — "
     f"{invariants_count} stored invariant(s), {personas_count} persona(s), "
-    f"{search_learnings_count} learned search insight(s) remembered."
+    f"{search_learnings_count} learned search insight(s) retained."
 )
 
 # ---------------------------------------------------------
 # UI TABS
 # ---------------------------------------------------------
-tab_run, tab_offgrid, tab_memory, tab_boundary = st.tabs([
-    "🚀 Ticket Generator & Analysis",
-    "📋 Off-Grid Paste Ingestor",
+tab_offgrid, tab_run, tab_memory, tab_boundary = st.tabs([
+    "📋 Off-Grid Paste Ingestor & Azure Publisher",
+    "🚀 Full Ticket Generator & Analysis",
     "🧠 Project Knowledge Base",
-    "⚙️ Search & Boundary Conditions"
+    "⚙️ Boundary Conditions"
 ])
 
 # ---------------------------------------------------------
-# TAB 1: RUN ENGINE (API Mode)
+# TAB 1: OFF-GRID INGESTOR (Direct Paste from Gemini Web)
+# ---------------------------------------------------------
+with tab_offgrid:
+    st.markdown("### 📋 Direct Gemini Web Ingestion & Azure DevOps Publisher")
+    st.caption("Paste any raw scenario or test case generated in your Gemini chat. The brain will absorb its rules into local memory, render Azure-ready HTML, and let you push it directly to Azure DevOps.")
+
+    col_og_wit, col_og_dest = st.columns([1.5, 2])
+    with col_og_wit:
+        offgrid_wit = st.selectbox(
+            "Target Azure Work Item",
+            ALL_AZURE_WITS,
+            index=ALL_AZURE_WITS.index("Test Case"),
+            key="offgrid_wit_select"
+        )
+    with col_og_dest:
+        dest_display = f"**{azure_target_project}**" if azure_target_project else "*None selected (Configure PAT in sidebar)*"
+        st.markdown(f"Target Azure Project: {dest_display}")
+
+    pasted_raw_text = st.text_area(
+        "Paste Raw Gemini Text / JSON Output Here",
+        placeholder="Paste response text or JSON directly from your Gemini web conversation...",
+        height=240,
+        key="offgrid_paste_area"
+    )
+
+    if st.button("📥 Parse, Learn & Format", type="primary", use_container_width=True):
+        if not pasted_raw_text.strip():
+            st.warning("Please paste content from Gemini first.")
+        else:
+            formatted_res = ingest_raw_gemini_text(
+                raw_text=pasted_raw_text,
+                project_name=active_project_name,
+                work_item_type=offgrid_wit
+            )
+            st.session_state["last_parsed_result"] = formatted_res
+            st.session_state["last_parsed_wit"] = offgrid_wit
+            st.success(f"Absorbed learnings into memory for `{active_project_name}`!")
+
+    # Display results and direct push action
+    if "last_parsed_result" in st.session_state:
+        res = st.session_state["last_parsed_result"]
+        current_wit = st.session_state.get("last_parsed_wit", "Test Case")
+
+        st.markdown("---")
+
+        if azure_target_project and azure_pat_input:
+            if st.button(f"🚀 Publish Directly to Azure DevOps ({azure_target_project})", type="primary", use_container_width=True):
+                with st.spinner("Submitting to Azure DevOps REST API..."):
+                    push_res = create_azure_work_item(
+                        org_name=azure_org_input,
+                        project=azure_target_project,
+                        work_item_type=current_wit,
+                        title=res["title"],
+                        field_1_name=res["field_1_name"],
+                        field_1_content=res["field_1_content"],
+                        field_2_name=res["field_2_name"],
+                        field_2_content=res["field_2_content"],
+                        pat=azure_pat_input
+                    )
+                    if push_res.get("success"):
+                        st.balloons()
+                        st.success(f"🎉 Created {current_wit} #{push_res['id']} in Azure DevOps!")
+                        st.markdown(f"👉 **[Open Work Item #{push_res['id']} in Azure DevOps]({push_res['url']})**")
+                    else:
+                        st.error(f"Failed to publish to Azure: {push_res.get('error')}")
+        else:
+            st.info("💡 Tip: Connect your Azure Org and PAT in the left sidebar to enable direct 1-click publishing.")
+
+        st.markdown("### 1. Title")
+        st.code(res["title"], language="text")
+
+        col_o1, col_o2 = st.columns(2)
+        with col_o1:
+            st.markdown(f"### 2. {res['field_1_name']}")
+            with st.expander("👁️ Rendered Preview", expanded=True):
+                st.markdown(res["field_1_content"], unsafe_allow_html=True)
+            st.caption("Azure HTML snippet:")
+            st.code(res["field_1_content"], language="html")
+
+        with col_o2:
+            st.markdown(f"### 3. {res['field_2_name']}")
+            with st.expander("👁️ Rendered Preview", expanded=True):
+                st.markdown(res["field_2_content"], unsafe_allow_html=True)
+            st.caption("Azure HTML snippet:")
+            st.code(res["field_2_content"], language="html")
+
+# ---------------------------------------------------------
+# TAB 2: RUN ENGINE (API Mode)
 # ---------------------------------------------------------
 with tab_run:
     col_text, col_controls = st.columns([2.5, 1.2])
@@ -141,8 +287,9 @@ with tab_run:
     with col_controls:
         target_wit = st.selectbox(
             "Target Azure Work Item",
-            ["User Story", "Bug", "Test Case", "Feature", "Epic", "Task", "Issue"],
-            index=2
+            ALL_AZURE_WITS,
+            index=ALL_AZURE_WITS.index("Test Case"),
+            key="run_wit_select"
         )
         search_requested = st.checkbox("🌐 Live Google Search Grounding", value=True)
         st.caption("Auto-disabled when screenshots are staged.")
@@ -224,79 +371,52 @@ with tab_run:
                         enable_web_search=enable_search
                     )
                     formatted = format_for_azure_clipboard(ticket_data, target_wit)
-
+                    st.session_state["api_generated_result"] = formatted
+                    st.session_state["api_generated_wit"] = target_wit
                     st.success(f"Generated {target_wit} for '{active_project_name}'!")
-
-                    st.markdown("### 1. Title (Copy into Azure 'Title')")
-                    st.code(formatted["title"], language="text")
-
-                    col_f1, col_f2 = st.columns(2)
-                    with col_f1:
-                        st.markdown(f"### 2. {formatted['field_1_name']}")
-                        with st.expander("👁️ Rendered Preview", expanded=True):
-                            st.markdown(formatted["field_1_content"], unsafe_allow_html=True)
-                        st.caption(f"Click copy icon below to paste into Azure '{formatted['field_1_name']}':")
-                        st.code(formatted["field_1_content"], language="html")
-
-                    with col_f2:
-                        st.markdown(f"### 3. {formatted['field_2_name']}")
-                        with st.expander("👁️ Rendered Preview", expanded=True):
-                            st.markdown(formatted["field_2_content"], unsafe_allow_html=True)
-                        st.caption(f"Click copy icon below to paste into Azure '{formatted['field_2_name']}':")
-                        st.code(formatted["field_2_content"], language="html")
-
                 except Exception as e:
                     st.error(f"Execution Error: {e}")
 
-# ---------------------------------------------------------
-# TAB 2: OFF-GRID INGESTOR (Direct Paste from Gemini Web)
-# ---------------------------------------------------------
-with tab_offgrid:
-    st.markdown(f"### 📋 Direct Gemini Web Clipboard Ingestion (`{active_project_name}`)")
-    st.caption("Paste any raw response directly from this Gemini conversation. It formats Azure DevOps blocks and saves rules into project memory with zero API quota or connection timeouts.")
+    if "api_generated_result" in st.session_state:
+        formatted = st.session_state["api_generated_result"]
+        gen_wit = st.session_state.get("api_generated_wit", "Test Case")
 
-    col_paste_mode, col_wit = st.columns([2, 1])
-    with col_wit:
-        offgrid_wit = st.selectbox(
-            "Target Work Item Type",
-            ["Test Case", "User Story", "Bug", "Feature", "Epic"],
-            key="offgrid_wit_select"
-        )
+        if azure_target_project and azure_pat_input:
+            if st.button(f"🚀 Publish Directly to Azure DevOps ({azure_target_project})", key="api_push_btn", type="primary", use_container_width=True):
+                with st.spinner("Submitting to Azure..."):
+                    push_res = create_azure_work_item(
+                        org_name=azure_org_input,
+                        project=azure_target_project,
+                        work_item_type=gen_wit,
+                        title=formatted["title"],
+                        field_1_name=formatted["field_1_name"],
+                        field_1_content=formatted["field_1_content"],
+                        field_2_name=formatted["field_2_name"],
+                        field_2_content=formatted["field_2_content"],
+                        pat=azure_pat_input
+                    )
+                    if push_res.get("success"):
+                        st.balloons()
+                        st.success(f"🎉 Created {gen_wit} #{push_res['id']} in Azure DevOps!")
+                        st.markdown(f"👉 **[Open Work Item #{push_res['id']}]({push_res['url']})**")
+                    else:
+                        st.error(f"Azure error: {push_res.get('error')}")
 
-    pasted_raw_text = st.text_area(
-        "Paste Raw Gemini Text / JSON Output Here",
-        placeholder="Paste response text or JSON directly from your Gemini web conversation...",
-        height=260,
-        key="offgrid_paste_area"
-    )
+        st.markdown("### 1. Title")
+        st.code(formatted["title"], language="text")
 
-    if st.button("📥 Parse & Format for Azure", type="primary", use_container_width=True):
-        if not pasted_raw_text.strip():
-            st.warning("Please paste an answer first.")
-        else:
-            formatted_res = ingest_raw_gemini_text(
-                raw_text=pasted_raw_text,
-                project_name=active_project_name,
-                work_item_type=offgrid_wit
-            )
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            st.markdown(f"### 2. {formatted['field_1_name']}")
+            with st.expander("👁️ Rendered Preview", expanded=True):
+                st.markdown(formatted["field_1_content"], unsafe_allow_html=True)
+            st.code(formatted["field_1_content"], language="html")
 
-            st.success(f"Absorbed learnings into '{active_project_name}' and formatted for Azure DevOps!")
-
-            st.markdown("### 1. Title (Copy into Azure 'Title')")
-            st.code(formatted_res["title"], language="text")
-
-            col_o1, col_o2 = st.columns(2)
-            with col_o1:
-                st.markdown(f"### 2. {formatted_res['field_1_name']}")
-                with st.expander("👁️ Rendered Preview", expanded=True):
-                    st.markdown(formatted_res["field_1_content"], unsafe_allow_html=True)
-                st.code(formatted_res["field_1_content"], language="html")
-
-            with col_o2:
-                st.markdown(f"### 3. {formatted_res['field_2_name']}")
-                with st.expander("👁️ Rendered Preview", expanded=True):
-                    st.markdown(formatted_res["field_2_content"], unsafe_allow_html=True)
-                st.code(formatted_res["field_2_content"], language="html")
+        with col_f2:
+            st.markdown(f"### 3. {formatted['field_2_name']}")
+            with st.expander("👁️ Rendered Preview", expanded=True):
+                st.markdown(formatted["field_2_content"], unsafe_allow_html=True)
+            st.code(formatted["field_2_content"], language="html")
 
 # ---------------------------------------------------------
 # TAB 3: PROJECT MEMORY INSPECTOR
@@ -324,41 +444,25 @@ with tab_memory:
             for item in search_learnings:
                 st.markdown(f"- 🔍 {item}")
         else:
-            st.caption("No external search knowledge saved yet. Web search queries will record learnings here automatically.")
+            st.caption("No external search knowledge saved yet.")
 
 # ---------------------------------------------------------
 # TAB 4: BOUNDARY CONDITIONS
 # ---------------------------------------------------------
 with tab_boundary:
     st.markdown("### 🎯 Grounding Boundaries & Scope Invariants")
-    st.info("The engine treats these rules as non-negotiable boundaries during analysis.")
-
     default_guardrails = (
         "[MANDATORY ARCHITECTURAL & TEST DESIGN GUARDRAILS]\n\n"
-        "1. BIG PICTURE TAB REASONING (NO MICRO-INTERACTIONS):\n"
-        "   - Focus strictly on tabs and views at a macroscopic business level.\n"
-        "   - DO NOT write individual click, hover, or micro-interaction steps.\n\n"
-        "2. MULTI-TAB SHARED PURPOSE RULE:\n"
-        "   - Consolidate related configuration views into a single unified lifecycle scenario.\n\n"
-        "3. USER INTENT & BUSINESS-DRIVEN NAVIGATION:\n"
-        "   - Frame navigation around business state changes and system validation.\n\n"
-        "4. END-TO-END LIFECYCLE (START TO FINISH):\n"
-        "   - Map from initial entry through dependent tabs to persisted business outcome.\n\n"
-        "5. ZERO DUPLICATION OF COMPLETED FLOWS:\n"
-        "   - State prerequisites once in preconditions; proceed directly to novel transitions.\n\n"
-        "6. CROSS-TAB STATE MUTATION & PERSISTENCE INVARIANTS:\n"
-        "   - Verify state coherence and rollback on abandoned multi-tab entries.\n\n"
-        "7. RBAC & MULTI-TENANT PERMISSION GATING:\n"
-        "   - Verify workflow execution against permission tiers (Super Admin, Tenant Admin, Standard User).\n\n"
-        "8. ADVERSARIAL CONCURRENCY & DEFENSIVE BOUNDARIES:\n"
-        "   - Cover state conflicts, simultaneous updates, and negative boundaries.\n\n"
-        "9. DETERMINISTIC VERIFICATION OUTPUT:\n"
-        "   - Structure verification points as '[Business Trigger] -> [Concrete Persisted Outcome]'."
+        "1. BIG PICTURE TAB REASONING: Focus strictly on tabs and views at a macroscopic business level.\n"
+        "2. CONSOLIDATED SCENARIO: Combine dependent tabs into one cohesive lifecycle scenario.\n"
+        "3. NO MICRO-INTERACTION CLICKS: Avoid 'Click button X' or trivial UI movements.\n"
+        "4. STRICT RBAC ISOLATION: Explicitly validate permissions across role tiers.\n"
+        "5. CROSS-TAB STATE MUTATION: Validate state coherence and rollback on cancellation."
     )
 
     boundary_text = st.text_area(
         "Negative Boundaries / Scoping Rules",
         value=default_guardrails,
-        height=320,
+        height=260,
         key="custom_boundaries"
     )
