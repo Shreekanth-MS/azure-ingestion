@@ -7,7 +7,7 @@ import base64
 from typing import Dict, Any, List, Tuple
 
 # ---------------------------------------------------------
-# Page Setup & Modern App Styling
+# Page Setup & Modern SaaS UI Styling
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Enterprise QA Engine & Azure Ingestion",
@@ -24,17 +24,6 @@ st.markdown("""
         font-family: 'Inter', -apple-system, sans-serif;
     }
     
-    /* Main App Card containers */
-    .app-card {
-        background-color: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 12px;
-        padding: 20px 24px;
-        margin-bottom: 20px;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }
-    
-    /* Status banner tags */
     .metric-pill {
         display: inline-flex;
         align-items: center;
@@ -46,6 +35,7 @@ st.markdown("""
         border-radius: 20px;
         border: 1px solid #cbd5e1;
         margin-right: 8px;
+        margin-bottom: 6px;
     }
     
     .learning-box-new {
@@ -95,37 +85,111 @@ st.markdown("""
 MEMORY_FILE = "projects_memory.json"
 
 # ---------------------------------------------------------
-# Memory Persistence Engine
+# Dynamic Memory Persistence Engine (Disk + Cloud GitHub Sync)
 # ---------------------------------------------------------
+def get_gh_headers() -> Dict[str, str]:
+    token = ""
+    if hasattr(st, "secrets") and "GITHUB_TOKEN" in st.secrets:
+        token = st.secrets["GITHUB_TOKEN"]
+    else:
+        token = os.getenv("GITHUB_TOKEN", "")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
 def load_memories() -> Dict[str, Any]:
+    repo = ""
+    if hasattr(st, "secrets") and "GITHUB_REPO" in st.secrets:
+        repo = st.secrets["GITHUB_REPO"]
+    else:
+        repo = os.getenv("GITHUB_REPO", "")
+
+    # 1. Attempt to fetch latest memory state from GitHub repo
+    if repo and (hasattr(st, "secrets") and "GITHUB_TOKEN" in st.secrets or os.getenv("GITHUB_TOKEN")):
+        try:
+            url = f"https://api.github.com/repos/{repo}/contents/{MEMORY_FILE}"
+            res = requests.get(url, headers=get_gh_headers(), timeout=5)
+            if res.status_code == 200:
+                raw_json = base64.b64decode(res.json()["content"]).decode("utf-8")
+                return json.loads(raw_json)
+        except Exception:
+            pass
+
+    # 2. Local physical file fallback
     if os.path.exists(MEMORY_FILE):
         try:
             with open(MEMORY_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
+
+    # 3. Default fallback state
     return {
         "TB Direct": {
             "summary": "Enterprise architecture and QA workspace for TB Direct / Trublu Dental.",
             "invariants": [
                 "Macroscopic big-picture view: omit trivial micro-interaction click steps.",
+                "Consolidate multiple related tabs into a single unified end-to-end lifecycle scenario.",
                 "Strict RBAC validation: isolate permissions across administrative and standard roles.",
+                "Cross-tab state persistence: ensure upstream modifications propagate without data loss.",
                 "Impersonation sessions must cleanly terminate and restore Super Admin context without leaked tokens."
             ],
-            "personas": ["Super Admin", "Practice Admin", "Standard User"],
+            "personas": ["Super Admin", "System Admin", "Practice Admin", "Standard User"],
             "learned_search_knowledge": []
         },
         "Default SaaS Project": {
-            "summary": "Standard SaaS tenant architecture.",
-            "invariants": ["Tenant isolation must be enforced."],
+            "summary": "Initial multi-tenant SaaS architecture workspace.",
+            "invariants": [
+                "Tenant isolation and role-based permissions must be enforced.",
+                "Cross-tab state changes must validate rollback behavior on cancel."
+            ],
             "personas": ["Super Admin", "Standard User"],
             "learned_search_knowledge": []
         }
     }
 
 def save_memories(data: Dict[str, Any]):
-    with open(MEMORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    # Save locally to immediate runtime disk
+    try:
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+    # Push to GitHub repository in background if configured
+    repo = ""
+    if hasattr(st, "secrets") and "GITHUB_REPO" in st.secrets:
+        repo = st.secrets["GITHUB_REPO"]
+    else:
+        repo = os.getenv("GITHUB_REPO", "")
+
+    token = ""
+    if hasattr(st, "secrets") and "GITHUB_TOKEN" in st.secrets:
+        token = st.secrets["GITHUB_TOKEN"]
+    else:
+        token = os.getenv("GITHUB_TOKEN", "")
+
+    if repo and token:
+        try:
+            url = f"https://api.github.com/repos/{repo}/contents/{MEMORY_FILE}"
+            headers = get_gh_headers()
+            sha = ""
+            get_res = requests.get(url, headers=headers, timeout=5)
+            if get_res.status_code == 200:
+                sha = get_res.json().get("sha", "")
+
+            content_b64 = base64.b64encode(json.dumps(data, indent=2).encode("utf-8")).decode("utf-8")
+            payload = {
+                "message": "sync: dynamic project memory update [skip ci]",
+                "content": content_b64
+            }
+            if sha:
+                payload["sha"] = sha
+
+            requests.put(url, headers=headers, json=payload, timeout=8)
+        except Exception:
+            pass
 
 if "memories" not in st.session_state:
     st.session_state.memories = load_memories()
@@ -157,15 +221,17 @@ if not st.session_state.authenticated:
     st.stop()
 
 # ---------------------------------------------------------
-# Azure DevOps Helpers
+# Azure DevOps REST Integration Helpers
 # ---------------------------------------------------------
-def get_azure_credentials() -> Tuple[str, str]:
+def get_azure_credentials() -> Tuple[str, str, str]:
     org = ""
     pat = ""
+    gemini_key = ""
     if hasattr(st, "secrets"):
         org = st.secrets.get("AZURE_ORG", "")
         pat = st.secrets.get("AZURE_PAT", "")
-    return org, pat
+        gemini_key = st.secrets.get("GEMINI_API_KEYS", "") or st.secrets.get("GEMINI_API_KEY", "")
+    return org, pat, gemini_key
 
 def fetch_azure_projects(org: str, pat: str) -> List[str]:
     clean_org = org.replace("https://dev.azure.com/", "").strip("/")
@@ -205,7 +271,7 @@ def publish_work_item(org: str, pat: str, project: str, wit_type: str, title: st
         return False, f"Request error: {str(e)}"
 
 # ---------------------------------------------------------
-# TCM Steps XML Parser
+# TCM Steps XML & Heuristic Invariant Extraction
 # ---------------------------------------------------------
 def convert_to_tcm_xml(steps: List[Dict[str, str]]) -> str:
     if not steps:
@@ -243,14 +309,12 @@ def extract_steps_and_learn(raw_text: str, current_proj: str, current_persona: s
                 exp = parts[1].strip('"').strip()
                 steps.append({"action": act, "expected": exp})
                 
-        # Heuristic invariant detection
         if any(keyword in l.lower() for keyword in ["must", "ensure", "shall", "cannot", "isolate"]):
             clean_rule = l.strip("-* 0123456789.,\"")
             if len(clean_rule) > 18:
                 new_invariants.append(clean_rule)
                 
-    # Persist detected invariants into memory
-    target_mem = st.session_state.memories.get(current_proj, {"invariants": [], "personas": []})
+    target_mem = st.session_state.memories.get(current_proj, {"invariants": [], "personas": [], "learned_search_knowledge": []})
     existing = set(target_mem.get("invariants", []))
     added = [inv for inv in new_invariants if inv not in existing]
     
@@ -264,7 +328,7 @@ def extract_steps_and_learn(raw_text: str, current_proj: str, current_persona: s
 # ---------------------------------------------------------
 # Sidebar Configuration
 # ---------------------------------------------------------
-default_org, default_pat = get_azure_credentials()
+default_org, default_pat, default_gemini = get_azure_credentials()
 st.sidebar.markdown("### ☁️ Azure DevOps REST")
 azure_org = st.sidebar.text_input("Azure Org Name", value=default_org, placeholder="TrubluDental")
 azure_pat = st.sidebar.text_input("Personal Access Token (PAT)", value=default_pat, type="password")
@@ -290,26 +354,30 @@ if st.session_state.azure_projects:
 else:
     st.sidebar.info("Fetch projects to enable direct publishing.")
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("### 🤖 Model Engine")
+gemini_key_input = st.sidebar.text_input("Gemini API Key", value=default_gemini, type="password")
+
 # ---------------------------------------------------------
-# Top Bar: Profile & Persona Control Hub
+# Top Bar: Profile & Dynamic Persona Control Hub
 # ---------------------------------------------------------
 st.markdown("## ⚡ Enterprise QA Workbench")
 
 col_prof, col_persona = st.columns([1, 1])
 
-# 1. Project Profile Selector
+# 1. Dynamic Project Profile Selector
 with col_prof:
-    st.markdown("**📁 Project Memory Profile**")
+    st.markdown("**📁 Local Learning Memory Profile**")
     proj_keys = list(st.session_state.memories.keys())
     proj_options = proj_keys + ["➕ [Add New Project]"]
     active_proj_selection = st.selectbox("Project Profile", options=proj_options, label_visibility="collapsed")
     
     if active_proj_selection == "➕ [Add New Project]":
-        new_proj_name = st.text_input("Name for new project workspace:", placeholder="e.g., DentalPortal")
+        new_proj_name = st.text_input("Enter new project workspace name:", placeholder="e.g., DentalPortal")
         if st.button("Create Project Profile", type="primary"):
-            if new_proj_name and new_proj_name not in st.session_state.memories:
-                st.session_state.memories[new_proj_name] = {
-                    "summary": f"Workspace for {new_proj_name}",
+            if new_proj_name.strip() and new_proj_name.strip() not in st.session_state.memories:
+                st.session_state.memories[new_proj_name.strip()] = {
+                    "summary": f"Workspace for {new_proj_name.strip()}",
                     "invariants": [],
                     "personas": ["Super Admin", "Standard User"],
                     "learned_search_knowledge": []
@@ -320,43 +388,101 @@ with col_prof:
     else:
         active_project = active_proj_selection
 
-# 2. Persona Selector with Inline Creator
+# 2. Dynamic Persona Selector with Inline Edit/Delete
 with col_persona:
     st.markdown("**👤 Active Execution Persona**")
     proj_data = st.session_state.memories.get(active_project, {})
     current_personas = proj_data.get("personas", ["Super Admin", "Standard User"])
-    persona_options = current_personas + ["➕ [Add New Persona...]"]
     
-    active_persona_selection = st.selectbox("Execution Persona", options=persona_options, label_visibility="collapsed")
+    action_options = ["➕ [Add New Persona...]", "✏️ [Edit Active Persona...]", "🗑️ [Delete Active Persona]"]
+    persona_options = current_personas + action_options
     
+    default_idx = 0
+    if "selected_persona_name" in st.session_state and st.session_state.selected_persona_name in current_personas:
+        default_idx = current_personas.index(st.session_state.selected_persona_name)
+
+    active_persona_selection = st.selectbox(
+        "Execution Persona", 
+        options=persona_options, 
+        index=default_idx,
+        label_visibility="collapsed"
+    )
+    
+    # Action A: Add New Persona
     if active_persona_selection == "➕ [Add New Persona...]":
         new_persona_name = st.text_input("Enter new persona title:", placeholder="e.g., Regional Billing Specialist")
         if st.button("Save Persona to Project", type="primary"):
-            if new_persona_name and new_persona_name not in current_personas:
-                current_personas.append(new_persona_name)
+            if new_persona_name.strip() and new_persona_name.strip() not in current_personas:
+                current_personas.append(new_persona_name.strip())
                 proj_data["personas"] = current_personas
                 st.session_state.memories[active_project] = proj_data
+                st.session_state.selected_persona_name = new_persona_name.strip()
                 save_memories(st.session_state.memories)
                 st.rerun()
         st.stop()
+
+    # Action B: Edit Active Persona
+    elif active_persona_selection == "✏️ [Edit Active Persona...]":
+        target_to_edit = st.session_state.get("selected_persona_name", current_personas[0] if current_personas else "")
+        edited_name = st.text_input(f"Rename persona '{target_to_edit}':", value=target_to_edit)
+        col_save_e, col_cancel_e = st.columns([1, 1])
+        with col_save_e:
+            if st.button("Update Persona Name", type="primary"):
+                if edited_name.strip() and edited_name.strip() != target_to_edit:
+                    idx = current_personas.index(target_to_edit)
+                    current_personas[idx] = edited_name.strip()
+                    proj_data["personas"] = current_personas
+                    st.session_state.memories[active_project] = proj_data
+                    st.session_state.selected_persona_name = edited_name.strip()
+                    save_memories(st.session_state.memories)
+                    st.rerun()
+        with col_cancel_e:
+            if st.button("Cancel"):
+                st.rerun()
+        st.stop()
+
+    # Action C: Delete Active Persona
+    elif active_persona_selection == "🗑️ [Delete Active Persona]":
+        target_to_delete = st.session_state.get("selected_persona_name", current_personas[0] if current_personas else "")
+        if len(current_personas) <= 1:
+            st.error("Cannot delete the only persona in this project.")
+            if st.button("Go Back"):
+                st.rerun()
+        else:
+            st.warning(f"Are you sure you want to delete persona **'{target_to_delete}'**?")
+            col_del_c, col_del_cancel = st.columns([1, 1])
+            with col_del_c:
+                if st.button("Yes, Confirm Delete", type="primary"):
+                    current_personas.remove(target_to_delete)
+                    proj_data["personas"] = current_personas
+                    st.session_state.memories[active_project] = proj_data
+                    st.session_state.selected_persona_name = current_personas[0]
+                    save_memories(st.session_state.memories)
+                    st.rerun()
+            with col_del_cancel:
+                if st.button("Cancel"):
+                    st.rerun()
+        st.stop()
+
     else:
         active_persona = active_persona_selection
+        st.session_state.selected_persona_name = active_persona
 
-# Live Knowledge Banner
+# Visual Metric Badge Bar
 inv_count = len(proj_data.get("invariants", []))
 persona_count = len(proj_data.get("personas", []))
+search_count = len(proj_data.get("learned_search_knowledge", []))
 st.markdown(f"""
 <div style="margin-bottom: 16px;">
     <span class="metric-pill">📌 Active: <strong>{active_project}</strong></span>
     <span class="metric-pill">👤 Persona: <strong>{active_persona}</strong></span>
     <span class="metric-pill">🧠 {inv_count} Stored Invariants</span>
-    <span class="metric-pill">👥 {persona_count} Configured Personas</span>
+    <span class="metric-pill">👥 {persona_count} Personas</span>
+    <span class="metric-pill">🌐 {search_count} Search Learnings</span>
 </div>
 """, unsafe_allow_html=True)
 
-# ---------------------------------------------------------
-# Dynamic Invariant Learning Notification Box
-# ---------------------------------------------------------
+# Learning Delta Notification Box
 if st.session_state.last_learning_delta:
     delta = st.session_state.last_learning_delta
     if delta.get("added_invariants"):
@@ -376,32 +502,41 @@ if st.session_state.last_learning_delta:
         """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# Workspace Tabs
+# Workspace Core Tabs
 # ---------------------------------------------------------
-tab_ingest, tab_kb = st.tabs([
-    "📋 Off-Grid Ingestor & Publisher", 
-    "🧠 Project Knowledge Base"
+tab_ingest, tab_gen, tab_kb, tab_boundary = st.tabs([
+    "📋 Off-Grid Paste Ingestor & Azure Publisher", 
+    "🚀 Full Ticket Generator & Analysis", 
+    "🧠 Project Knowledge Base",
+    "⚙️ Boundary Conditions"
 ])
 
-# TAB 1: Ingestion & Publishing
+# ---------------------------------------------------------
+# TAB 1: Off-Grid Paste Ingestor & Publisher
+# ---------------------------------------------------------
 with tab_ingest:
+    st.markdown("### Direct Gemini Web Ingestion & Azure DevOps Publisher")
+    st.caption("Paste any raw scenario or test case generated in your chat. The brain absorbs rules into local memory, renders Azure-ready HTML, and pushes directly to Azure DevOps.")
+
     col_wit, col_target = st.columns([1, 1])
     with col_wit:
         target_wit = st.selectbox(
             "Target Azure Work Item",
-            ["Test Case", "Bug", "User Story", "Task", "Feature", "Epic", "Issue"]
+            ["Test Case", "Bug", "User Story", "Task", "Feature", "Epic", "Issue"],
+            key="ingest_wit"
         )
     with col_target:
-        target_disp = selected_azure_project if selected_azure_project else "None selected (Set PAT in sidebar)"
-        st.text_input("Destination Azure Project", value=target_disp, disabled=True)
+        target_disp = selected_azure_project if selected_azure_project else "None selected (Configure PAT in sidebar)"
+        st.text_input("Target Azure Project", value=target_disp, disabled=True, key="ingest_disp")
 
     raw_input = st.text_area(
-        "Paste Raw Gemini Text / CSV Output",
-        height=170,
-        placeholder="Title: Verify Practice tab completed practices\nStep #,Action,Expected Result\n1,Log in as Super Admin and open Practice view,Completed practices list displays\n2,Click column header sorting,Table updates cleanly without state reset"
+        "Paste Raw Gemini Text / JSON Output Here",
+        height=180,
+        placeholder="Paste response text or JSON directly from your Gemini web conversation...",
+        key="ingest_raw"
     )
 
-    if st.button("📥 Parse, Learn & Format", type="primary", use_container_width=True):
+    if st.button("📥 Parse, Learn & Format", type="primary", use_container_width=True, key="btn_parse_ingest"):
         if not raw_input.strip():
             st.warning("Please paste scenario text first.")
         else:
@@ -419,7 +554,6 @@ with tab_ingest:
             }
             st.rerun()
 
-    # Publishing controls when data is parsed
     if "last_parsed" in st.session_state:
         item = st.session_state.last_parsed
         st.markdown("---")
@@ -434,7 +568,7 @@ with tab_ingest:
             disp_xml = item["tcm_xml"] if item["tcm_xml"] else "(No CSV steps formatted)"
             st.markdown(f'<div class="code-display">{disp_xml}</div>', unsafe_allow_html=True)
 
-        if st.button(f"🚀 Publish Directly to Azure DevOps ({item['wit']})", type="primary", use_container_width=True):
+        if st.button(f"🚀 Publish Directly to Azure DevOps ({item['wit']})", type="primary", use_container_width=True, key="btn_publish_ingest"):
             if not azure_org or not azure_pat or not selected_azure_project:
                 st.error("Please provide Azure Org, PAT, and select an Azure Project in the sidebar first.")
             else:
@@ -453,7 +587,98 @@ with tab_ingest:
                     else:
                         st.error(msg)
 
-# TAB 2: Knowledge Base Management
+# ---------------------------------------------------------
+# TAB 2: Full Ticket Generator & Live Search Grounding
+# ---------------------------------------------------------
+with tab_gen:
+    st.markdown("### Generative Ticket Authoring & Search Grounding")
+    st.caption("Generate complete work items grounded with real-time web intelligence and learned project memory.")
+
+    col_req, col_gen_ctrl = st.columns([2, 1])
+    with col_req:
+        gen_prompt = st.text_area(
+            "Feature / Requirement / Defect Context",
+            height=120,
+            placeholder=f"e.g., In {active_project}, generate integration test case for administrative checkout and permission configuration."
+        )
+    with col_gen_ctrl:
+        gen_wit = st.selectbox(
+            "Target Azure Work Item",
+            ["Test Case", "Bug", "User Story", "Task", "Feature", "Epic", "Issue"],
+            key="gen_wit"
+        )
+        use_search_grounding = st.checkbox("🌐 Live Google Search Grounding", value=True)
+
+    st.markdown("#### 📸 Visual Reference (Persistent Staging)")
+    col_v1, col_v2 = st.columns(2)
+    with col_v1:
+        st.markdown("**Option A: Paste Screenshot from Clipboard**")
+        st.info("💡 You can capture a screenshot (`Win + Shift + S`) and paste it into the Gemini Web chat, or upload the file directly on the right.")
+    with col_v2:
+        st.markdown("**Option B: Upload Screenshot Files**")
+        uploaded_img = st.file_uploader("Select files across the workflow", type=["png", "jpg", "jpeg", "webp"], key="screen_upload")
+        if uploaded_img:
+            st.image(uploaded_img, caption="Staged Visual Evidence", use_column_width=True)
+
+    if st.button("🚀 Generate Ticket with Memory & Grounding", type="primary", use_container_width=True):
+        if not gen_prompt.strip():
+            st.warning("Please provide feature or defect context.")
+        elif not gemini_key_input:
+            st.error("Please provide a Gemini API Key in the left sidebar to use in-app generation.")
+        else:
+            with st.spinner("Authoring ticket with project invariants and search grounding..."):
+                try:
+                    mem_invariants = proj_data.get("invariants", [])
+                    invariants_text = "\n".join([f"- {inv}" for inv in mem_invariants])
+                    system_rules = f"""You are the Lead QA Architect for {active_project}.
+Active Persona: {active_persona}
+Learned Project Rules:
+{invariants_text}
+
+Output format:
+Title: <Actionable Title>
+Step #,Action,Expected Result
+1,<Action>,"<Expected Result>"
+"""
+                    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key_input}"
+                    
+                    tools_payload = []
+                    if use_search_grounding:
+                        tools_payload.append({"google_search": {}})
+
+                    req_body = {
+                        "contents": [
+                            {"role": "user", "parts": [{"text": f"{system_rules}\n\nUser Request:\n{gen_prompt}"}]}
+                        ]
+                    }
+                    if tools_payload:
+                        req_body["tools"] = tools_payload
+
+                    api_res = requests.post(endpoint, json=req_body, timeout=30)
+                    if api_res.status_code == 200:
+                        gen_text = api_res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                        
+                        parsed_title, steps, learned = extract_steps_and_learn(gen_text, active_project, active_persona)
+                        tcm_xml = convert_to_tcm_xml(steps)
+                        desc_html = f"<h3>Scope & Preconditions</h3><p>Generated for <strong>{active_project}</strong> ({active_persona}). Grounded: {use_search_grounding}</p>"
+
+                        st.session_state.last_learning_delta = {"added_invariants": learned}
+                        st.session_state.last_parsed = {
+                            "title": parsed_title,
+                            "wit": gen_wit,
+                            "desc_html": desc_html,
+                            "tcm_xml": tcm_xml,
+                            "steps_count": len(steps)
+                        }
+                        st.success("Ticket generated! Switch to Tab 1 to review and publish to Azure DevOps.")
+                    else:
+                        st.error(f"Generation error ({api_res.status_code}): {api_res.text}")
+                except Exception as e:
+                    st.error(f"Generation failed: {str(e)}")
+
+# ---------------------------------------------------------
+# TAB 3: Project Knowledge Base
+# ---------------------------------------------------------
 with tab_kb:
     st.markdown(f"### 🧠 Stored Knowledge for `{active_project}`")
     mem = st.session_state.memories.get(active_project, {})
@@ -467,10 +692,32 @@ with tab_kb:
             st.markdown(f"- **{p}**")
             
     with col_k2:
-        st.markdown("#### 🛡️ Learned System Invariants")
-        invariants = mem.get("invariants", [])
-        if invariants:
-            for inv in invariants:
-                st.markdown(f"- {inv}")
+        st.markdown("#### 🌐 Learned Search Knowledge (From Google)")
+        search_kn = mem.get("learned_search_knowledge", [])
+        if search_kn:
+            for sk in search_kn:
+                st.markdown(f"- {sk}")
         else:
-            st.info("No invariants recorded yet. Ingest scenarios to automatically absorb rules.")
+            st.info("No external search knowledge saved yet.")
+
+    st.markdown("---")
+    st.markdown("#### 🛡️ Learned System Invariants")
+    invariants = mem.get("invariants", [])
+    if invariants:
+        for inv in invariants:
+            st.markdown(f"- {inv}")
+    else:
+        st.info("No invariants recorded yet. Ingest scenarios to automatically absorb rules.")
+
+# ---------------------------------------------------------
+# TAB 4: Boundary Conditions
+# ---------------------------------------------------------
+with tab_boundary:
+    st.markdown(f"### ⚙️ Boundary Conditions & Testing Edge Cases for `{active_project}`")
+    st.caption("Active boundary definitions that enforce role separation, tenant limits, and validation rules.")
+    
+    st.markdown("""
+    - **Authentication Limits:** Impersonation tokens expire upon session close or navigation away from tenant portal.
+    - **RBAC Boundaries:** Standard users attempting administrative endpoints must trigger HTTP 403 Forbidden redirects.
+    - **Data Persistence:** Form drafts across multi-tab workflows must retain dirty-state flags until explicit submission or cancellation.
+    """)
