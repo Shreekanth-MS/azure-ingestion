@@ -16,7 +16,14 @@ load_dotenv(override=True)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECTS_FILE = os.path.join(BASE_DIR, "projects_memory.json")
 
-# All 7 supported Azure DevOps Work Item types[cite: 13]
+DEFAULT_GLOBAL_BOUNDARIES = (
+    "- Zero Outbound Data Leakage: Strictly prohibit transmitting, exposing, or echoing proprietary schemas, internal API endpoints, tenant IDs, PII, or project memory contents to external web search queries or third-party endpoints.\n"
+    "- One-Way Inbound Learning Only: Absorb rules, edge cases, and domain patterns from external user-provided inputs, pasted text, and uploaded screenshots, but never use internal project memory as outbound search context.\n"
+    "- Sanitized Search Query Isolation: When Live Google Search Grounding is active, outbound search queries must contain only generic public industry standards, protocols, or framework terms—never project names, client names, or internal business logic.\n"
+    "- Visual Context Air-Gap: Whenever UI screenshots or visual artifacts are uploaded, external web search grounding must be completely disabled so analysis relies 100% on local visual data and stored project memory."
+)
+
+# All 7 supported Azure DevOps Work Item types
 ALL_AZURE_WITS = [
     "Bug",
     "Epic",
@@ -29,28 +36,33 @@ ALL_AZURE_WITS = [
 
 
 # ----------------------------------------------------------------------
-# 1. PERSISTENT MULTI-PROJECT MEMORY[cite: 13]
+# 1. PERSISTENT MULTI-PROJECT MEMORY
 # ----------------------------------------------------------------------
 def _read_raw_store() -> dict:
-    """Reads the full memory store, auto-migrating flat schemas if present[cite: 13, 14]."""
+    """Reads the full memory store, auto-migrating legacy flat schemas if present."""
     if os.path.exists(PROJECTS_FILE):
         try:
             with open(PROJECTS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict) and data:
                     if "projects" in data:
+                        data.setdefault("global_boundaries", DEFAULT_GLOBAL_BOUNDARIES)
                         return data
-                    return {"active_project": list(data.keys())[0], "projects": data}
+                    return {
+                        "active_project": list(data.keys())[0],
+                        "global_boundaries": DEFAULT_GLOBAL_BOUNDARIES,
+                        "projects": data
+                    }
         except Exception:
             pass
     return {
         "active_project": "New Project",
+        "global_boundaries": DEFAULT_GLOBAL_BOUNDARIES,
         "projects": {
             "New Project": {
                 "summary": "Enterprise multi-tenant cloud application workspace.",
                 "invariants": ["Tenant isolation and role-based permissions must be enforced."],
                 "personas": ["Super Admin", "Standard User"],
-                "boundaries": [],
                 "learned_search_knowledge": []
             }
         }
@@ -58,12 +70,12 @@ def _read_raw_store() -> dict:
 
 
 def load_project_memories() -> dict:
-    """Loads long-term project knowledge and invariants[cite: 13]."""
+    """Loads long-term project knowledge and invariants."""
     return _read_raw_store().get("projects", {})
 
 
 def register_new_project(project_name: str) -> dict:
-    """Explicitly creates and persists a new project profile immediately[cite: 13]."""
+    """Explicitly creates and persists a new project profile immediately."""
     clean_name = project_name.strip()
     store = _read_raw_store()
     memories = store["projects"]
@@ -72,7 +84,6 @@ def register_new_project(project_name: str) -> dict:
             "summary": f"Enterprise architecture and QA workspace for {clean_name}.",
             "invariants": [],
             "personas": ["Super Admin", "Standard User"],
-            "boundaries": [],
             "learned_search_knowledge": []
         }
     store["active_project"] = clean_name
@@ -91,7 +102,7 @@ def save_project_memory(
     new_personas: list[str],
     new_search_learnings: list[str] = None
 ):
-    """Appends discovered invariants, personas, and web search discoveries to the project profile[cite: 13]."""
+    """Appends discovered invariants, personas, and web search discoveries to the project profile."""
     store = _read_raw_store()
     memories = store["projects"]
     if project_name not in memories:
@@ -99,7 +110,6 @@ def save_project_memory(
             "summary": new_summary,
             "invariants": [],
             "personas": [],
-            "boundaries": [],
             "learned_search_knowledge": []
         }
 
@@ -128,10 +138,10 @@ def save_project_memory(
 
 
 # ----------------------------------------------------------------------
-# 2. SANITIZATION & AZURE FORMATTING[cite: 13]
+# 2. SANITIZATION & AZURE FORMATTING
 # ----------------------------------------------------------------------
 def sanitize_input(text: str) -> str:
-    """Masks emails, internal IP addresses, API secrets, and DB connection strings[cite: 13]."""
+    """Masks emails, internal IP addresses, API secrets, and DB connection strings."""
     if not text:
         return ""
     text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[REDACTED_EMAIL]', text)
@@ -142,7 +152,7 @@ def sanitize_input(text: str) -> str:
 
 
 def format_for_azure_clipboard(ticket_data: dict, work_item_type: str) -> dict:
-    """Formats JSON output into Azure DevOps-compatible HTML blocks for clean copy-pasting[cite: 13]."""
+    """Formats JSON output into Azure DevOps-compatible HTML blocks for clean copy-pasting."""
     title = ticket_data.get("title_suggestion", "Architectural Requirement")
     arch_summary = ticket_data.get("architecture_summary", "")
     invariants = ticket_data.get("system_invariants", [])
@@ -269,7 +279,7 @@ def format_for_azure_clipboard(ticket_data: dict, work_item_type: str) -> dict:
 
 
 def ingest_raw_gemini_text(raw_text: str, project_name: str, work_item_type: str = "Test Case") -> dict:
-    """Parses unstructured text or JSON pasted directly from a Gemini web session[cite: 13]."""
+    """Parses unstructured text or JSON pasted directly from a Gemini web session."""
     clean_text = raw_text.strip()
 
     parsed_json = None
@@ -328,7 +338,7 @@ def ingest_raw_gemini_text(raw_text: str, project_name: str, work_item_type: str
 
 
 # ----------------------------------------------------------------------
-# 3. AZURE DEVOPS REST API INTEGRATION[cite: 13]
+# 3. AZURE DEVOPS REST API INTEGRATION
 # ----------------------------------------------------------------------
 def get_azure_auth_headers(pat: str) -> dict:
     b64_pat = base64.b64encode(f":{pat}".encode("utf-8")).decode("utf-8")
@@ -339,7 +349,7 @@ def get_azure_auth_headers(pat: str) -> dict:
 
 
 def fetch_azure_projects(org_name: str, pat: str) -> list[str]:
-    """Retrieves list of project names accessible by the given Azure PAT[cite: 13]."""
+    """Retrieves list of project names accessible by the given Azure PAT."""
     clean_org = org_name.strip().rstrip("/").split("/")[-1]
     url = f"https://dev.azure.com/{clean_org}/_apis/projects?api-version=7.1-preview.4"
     try:
@@ -364,7 +374,7 @@ def create_azure_work_item(
     field_2_content: str,
     pat: str
 ) -> dict:
-    """Creates a work item across all 7 types via REST API and returns item ID and web URL[cite: 13]."""
+    """Creates a work item across all 7 types via REST API and returns item ID and web URL."""
     clean_org = org_name.strip().rstrip("/").split("/")[-1]
     wit_clean = work_item_type.replace(" ", "%20")
     url = f"https://dev.azure.com/{clean_org}/{project}/_apis/wit/workitems/${wit_clean}?api-version=7.1"
@@ -405,7 +415,7 @@ def create_azure_work_item(
 
 
 # ----------------------------------------------------------------------
-# 4. KEY ROTATOR & GEMINI ENGINE[cite: 13]
+# 4. KEY ROTATOR & GEMINI ENGINE
 # ----------------------------------------------------------------------
 class KeyRotator:
     def __init__(self, keys: list[str]):
@@ -455,18 +465,17 @@ class DomainBrain:
         clean_req = sanitize_input(requirement)
         clean_boundaries = sanitize_input(boundaries)
 
-        memories = load_project_memories()
+        raw_store = _read_raw_store()
+        memories = raw_store.get("projects", {})
+        global_boundaries = raw_store.get("global_boundaries", "").strip()
         proj_mem = memories.get(project_name, {})
+
         known_summary = proj_mem.get("summary", "Enterprise cloud SaaS system.")
         known_invariants = "\n- ".join(proj_mem.get("invariants", []))
         known_personas = ", ".join(proj_mem.get("personas", []))
         known_search = "\n- ".join(proj_mem.get("learned_search_knowledge", []))
 
-        # Merge stored project boundaries with any passed-in boundary rules[cite: 13, 14]
-        saved_boundaries = "\n".join(
-            [f"- {b.get('title', 'Rule')}: {b.get('rule', '')}" for b in proj_mem.get("boundaries", [])]
-        )
-        all_boundaries = f"{saved_boundaries}\n{clean_boundaries}".strip()
+        all_boundaries = f"{global_boundaries}\n{clean_boundaries}".strip()
 
         memory_context = f"""
 INTERNAL BRAIN MEMORY FOR PROJECT [{project_name}]:
@@ -485,9 +494,10 @@ INTERNAL BRAIN MEMORY FOR PROJECT [{project_name}]:
         if enable_web_search and not has_images:
             active_tools = [{"google_search": {}}]
             search_instruction = """
-SEARCH PRIORITY & LEARNING RULE:
-1. Brain First: Check 'INTERNAL BRAIN MEMORY' before searching.
-2. Search Fallback: If external protocols or unknown 3rd-party APIs are referenced, use Google Search and record key rules under 'external_search_learnings'.
+ONE-WAY INBOUND LEARNING & ZERO-LEAKAGE GUARDRAIL:
+1. Never include internal project names, proprietary domain terms, credentials, or internal data inside Google Search queries.
+2. Search ONLY for public technical standards, regulatory rules, or generic software patterns.
+3. Absorb external standards and user-provided inputs into 'external_search_learnings' and 'system_invariants' without exposing internal context outward.
 """
         elif has_images:
             search_instruction = """
@@ -503,7 +513,7 @@ TARGET ARTIFACT: {mode}
 
 {search_instruction}
 
-NEGATIVE BOUNDARIES & INVARIANTS:
+GLOBAL NEGATIVE BOUNDARIES & GUARDRAILS:
 {all_boundaries}
 
 INSTRUCTIONS:

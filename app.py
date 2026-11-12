@@ -5,6 +5,13 @@ import re
 import requests
 import base64
 from typing import Dict, Any, List, Tuple
+from PIL import Image
+from brain import (
+    DomainBrain,
+    DEFAULT_GLOBAL_BOUNDARIES,
+    format_for_azure_clipboard,
+    ingest_raw_gemini_text
+)
 
 # ---------------------------------------------------------
 # Page Setup & Modern SaaS UI Styling
@@ -18,7 +25,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    @import url('[https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap](https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap)');
     
     html, body, [class*="css"] {
         font-family: 'Inter', -apple-system, sans-serif;
@@ -82,15 +89,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Anchor explicitly to the directory containing app.py
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MEMORY_FILE = os.path.join(BASE_DIR, "projects_memory.json")
 
-DEFAULT_BOUNDARIES = [
-    {"title": "Authentication Limits", "rule": "Impersonation tokens expire upon session close or navigation away from tenant portal."},
-    {"title": "RBAC Boundaries", "rule": "Standard users attempting administrative endpoints must trigger HTTP 403 Forbidden redirects."},
-    {"title": "Data Persistence", "rule": "Form drafts across multi-tab workflows must retain dirty-state flags until explicit submission or cancellation."}
-]
 
 # ---------------------------------------------------------
 # Dynamic Memory Persistence Engine (Disk + Cloud GitHub Sync)
@@ -106,44 +107,44 @@ def get_gh_headers() -> Dict[str, str]:
         "Accept": "application/vnd.github.v3+json"
     }
 
+
 def normalize_memory_schema(raw_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensures memory always conforms to {'active_project': str, 'projects': {...}}."""
+    """Ensures memory always conforms to {'active_project': str, 'global_boundaries': str, 'projects': {...}}."""
     if not isinstance(raw_data, dict) or not raw_data:
         return {
             "active_project": "New Project",
+            "global_boundaries": DEFAULT_GLOBAL_BOUNDARIES,
             "projects": {
                 "New Project": {
                     "summary": "Initial architecture workspace.",
                     "invariants": ["Tenant isolation and role-based permissions must be enforced."],
                     "personas": ["Super Admin", "System Admin", "Standard User"],
-                    "boundaries": list(DEFAULT_BOUNDARIES),
                     "learned_search_knowledge": []
                 }
             }
         }
 
-    # Migrate legacy flat dictionary format if detected
     if "projects" not in raw_data:
         first_proj = list(raw_data.keys())[0]
-        normalized = {"active_project": first_proj, "projects": raw_data}
+        normalized = {
+            "active_project": first_proj,
+            "global_boundaries": DEFAULT_GLOBAL_BOUNDARIES,
+            "projects": raw_data
+        }
     else:
         normalized = raw_data
+        normalized.setdefault("global_boundaries", DEFAULT_GLOBAL_BOUNDARIES)
 
-    # Ensure every project has required keys including 'boundaries'
     for proj_name, p_data in normalized["projects"].items():
-        if "boundaries" not in p_data:
-            p_data["boundaries"] = list(DEFAULT_BOUNDARIES)
-        if "invariants" not in p_data:
-            p_data["invariants"] = []
-        if "personas" not in p_data:
-            p_data["personas"] = ["Super Admin", "Standard User"]
-        if "learned_search_knowledge" not in p_data:
-            p_data["learned_search_knowledge"] = []
+        p_data.setdefault("invariants", [])
+        p_data.setdefault("personas", ["Super Admin", "Standard User"])
+        p_data.setdefault("learned_search_knowledge", [])
 
     if normalized.get("active_project") not in normalized["projects"]:
         normalized["active_project"] = list(normalized["projects"].keys())[0]
 
     return normalized
+
 
 def load_memories() -> Dict[str, Any]:
     repo = ""
@@ -153,9 +154,9 @@ def load_memories() -> Dict[str, Any]:
         repo = os.getenv("GITHUB_REPO", "")
 
     # 1. Attempt to fetch latest memory state from GitHub repo
-    if repo and (hasattr(st, "secrets") and "GITHUB_TOKEN" in st.secrets or os.getenv("GITHUB_TOKEN")):
+    if repo and ((hasattr(st, "secrets") and "GITHUB_TOKEN" in st.secrets) or os.getenv("GITHUB_TOKEN")):
         try:
-            url = f"https://api.github.com/repos/{repo}/contents/projects_memory.json"
+            url = f"[https://api.github.com/repos/](https://api.github.com/repos/){repo}/contents/projects_memory.json"
             res = requests.get(url, headers=get_gh_headers(), timeout=5)
             if res.status_code == 200:
                 raw_json = base64.b64decode(res.json()["content"]).decode("utf-8")
@@ -176,6 +177,7 @@ def load_memories() -> Dict[str, Any]:
     save_memories(default_state)
     return default_state
 
+
 def save_memories(data: Dict[str, Any]):
     # Save locally to immediate runtime disk
     try:
@@ -184,7 +186,7 @@ def save_memories(data: Dict[str, Any]):
     except Exception as e:
         st.warning(f"Local disk save warning: {e}")
 
-    # Push to GitHub repository if configured
+    # Push to GitHub repository in background if configured
     repo = ""
     if hasattr(st, "secrets") and "GITHUB_REPO" in st.secrets:
         repo = st.secrets["GITHUB_REPO"]
@@ -199,7 +201,7 @@ def save_memories(data: Dict[str, Any]):
 
     if repo and token:
         try:
-            url = f"https://api.github.com/repos/{repo}/contents/projects_memory.json"
+            url = f"[https://api.github.com/repos/](https://api.github.com/repos/){repo}/contents/projects_memory.json"
             headers = get_gh_headers()
             sha = ""
             get_res = requests.get(url, headers=headers, timeout=5)
@@ -218,8 +220,9 @@ def save_memories(data: Dict[str, Any]):
         except Exception:
             pass
 
-if "memory_store" not in st.session_state:
-    st.session_state.memory_store = load_memories()
+
+if "memories" not in st.session_state:
+    st.session_state.memories = load_memories()
 if "last_learning_delta" not in st.session_state:
     st.session_state.last_learning_delta = None
 
@@ -247,6 +250,7 @@ if not st.session_state.authenticated:
             st.error("Access Denied: Invalid credentials.")
     st.stop()
 
+
 # ---------------------------------------------------------
 # Azure DevOps REST Integration Helpers
 # ---------------------------------------------------------
@@ -260,9 +264,10 @@ def get_azure_credentials() -> Tuple[str, str, str]:
         gemini_key = st.secrets.get("GEMINI_API_KEYS", "") or st.secrets.get("GEMINI_API_KEY", "")
     return org, pat, gemini_key
 
+
 def fetch_azure_projects(org: str, pat: str) -> List[str]:
-    clean_org = org.replace("https://dev.azure.com/", "").strip("/")
-    url = f"https://dev.azure.com/{clean_org}/_apis/projects?api-version=7.1-preview.4"
+    clean_org = org.replace("[https://dev.azure.com/](https://dev.azure.com/)", "").strip("/")
+    url = f"[https://dev.azure.com/](https://dev.azure.com/){clean_org}/_apis/projects?api-version=7.1-preview.4"
     auth = base64.b64encode(f":{pat}".encode("utf-8")).decode("utf-8")
     headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json"}
     try:
@@ -273,9 +278,10 @@ def fetch_azure_projects(org: str, pat: str) -> List[str]:
         pass
     return []
 
+
 def publish_work_item(org: str, pat: str, project: str, wit_type: str, title: str, description_html: str, tcm_xml: str = "") -> Tuple[bool, str]:
-    clean_org = org.replace("https://dev.azure.com/", "").strip("/")
-    url = f"https://dev.azure.com/{clean_org}/{requests.utils.quote(project)}/_apis/wit/workitems/${requests.utils.quote(wit_type)}?api-version=7.1"
+    clean_org = org.replace("[https://dev.azure.com/](https://dev.azure.com/)", "").strip("/")
+    url = f"[https://dev.azure.com/](https://dev.azure.com/){clean_org}/{requests.utils.quote(project)}/_apis/wit/workitems/${requests.utils.quote(wit_type)}?api-version=7.1"
     auth = base64.b64encode(f":{pat}".encode("utf-8")).decode("utf-8")
     headers = {"Authorization": f"Basic {auth}", "Content-Type": "application/json-patch+json"}
     
@@ -297,6 +303,7 @@ def publish_work_item(org: str, pat: str, project: str, wit_type: str, title: st
     except Exception as e:
         return False, f"Request error: {str(e)}"
 
+
 # ---------------------------------------------------------
 # TCM Steps XML & Heuristic Invariant Extraction
 # ---------------------------------------------------------
@@ -315,6 +322,7 @@ def convert_to_tcm_xml(steps: List[Dict[str, str]]) -> str:
         )
     xml += "</steps>"
     return xml
+
 
 def extract_steps_and_learn(raw_text: str, current_proj: str, current_persona: str) -> Tuple[str, List[Dict[str, str]], List[str]]:
     lines = [l.strip() for l in raw_text.strip().split("\n") if l.strip()]
@@ -341,12 +349,11 @@ def extract_steps_and_learn(raw_text: str, current_proj: str, current_persona: s
             if len(clean_rule) > 18:
                 new_invariants.append(clean_rule)
                 
-    projects_dict = st.session_state.memory_store["projects"]
+    projects_dict = st.session_state.memories["projects"]
     target_mem = projects_dict.get(current_proj, {
         "summary": f"Workspace for {current_proj}",
         "invariants": [],
         "personas": ["Super Admin", "Standard User"],
-        "boundaries": list(DEFAULT_BOUNDARIES),
         "learned_search_knowledge": []
     })
     existing = set(target_mem.get("invariants", []))
@@ -355,9 +362,10 @@ def extract_steps_and_learn(raw_text: str, current_proj: str, current_persona: s
     if added:
         target_mem["invariants"] = list(dict.fromkeys(target_mem.get("invariants", []) + added))
         projects_dict[current_proj] = target_mem
-        save_memories(st.session_state.memory_store)
+        save_memories(st.session_state.memories)
         
     return title, steps, added
+
 
 # ---------------------------------------------------------
 # Sidebar Configuration
@@ -391,29 +399,30 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.markdown("### 🤖 Model Engine")
 gemini_key_input = st.sidebar.text_input("Gemini API Key", value=default_gemini, type="password")
+if gemini_key_input:
+    os.environ["GEMINI_API_KEYS"] = gemini_key_input
 
 # ---------------------------------------------------------
 # Top Bar: Profile & Dynamic Persona Control Hub
 # ---------------------------------------------------------
 st.markdown("## ⚡ Enterprise QA Workbench")
 
-store = st.session_state.memory_store
-projects_map = store["projects"]
+store = st.session_state.memories
+projects_dict = store["projects"]
 
 col_prof, col_persona = st.columns([1, 1])
 
 # 1. Dynamic Project Profile Selector
 with col_prof:
     st.markdown("**📁 Local Learning Memory Profile**")
-    proj_keys = list(projects_map.keys())
+    proj_keys = list(projects_dict.keys())
     proj_options = proj_keys + ["➕ [Add New Project]"]
-    
     saved_active = store.get("active_project", proj_keys[0])
     default_proj_idx = proj_options.index(saved_active) if saved_active in proj_options else 0
     
     active_proj_selection = st.selectbox(
-        "Project Profile", 
-        options=proj_options, 
+        "Project Profile",
+        options=proj_options,
         index=default_proj_idx,
         label_visibility="collapsed"
     )
@@ -421,17 +430,16 @@ with col_prof:
     if active_proj_selection == "➕ [Add New Project]":
         new_proj_name = st.text_input("Enter new project workspace name:", placeholder="e.g., FortuneMgmt")
         if st.button("Create Project Profile", type="primary"):
-            clean_p = new_proj_name.strip()
-            if clean_p:
-                if clean_p not in projects_map:
-                    projects_map[clean_p] = {
-                        "summary": f"Workspace for {clean_p}",
+            clean_name = new_proj_name.strip()
+            if clean_name:
+                if clean_name not in projects_dict:
+                    projects_dict[clean_name] = {
+                        "summary": f"Workspace for {clean_name}",
                         "invariants": [],
                         "personas": ["Super Admin", "Standard User"],
-                        "boundaries": list(DEFAULT_BOUNDARIES),
                         "learned_search_knowledge": []
                     }
-                store["active_project"] = clean_p
+                store["active_project"] = clean_name
                 save_memories(store)
                 st.rerun()
         st.stop()
@@ -444,7 +452,7 @@ with col_prof:
 # 2. Dynamic Persona Selector with Inline Edit/Delete
 with col_persona:
     st.markdown("**👤 Active Execution Persona**")
-    proj_data = projects_map.get(active_project, {})
+    proj_data = projects_dict.get(active_project, {})
     current_personas = proj_data.get("personas", ["Super Admin", "Standard User"])
     
     action_options = ["➕ [Add New Persona...]", "✏️ [Edit Active Persona...]", "🗑️ [Delete Active Persona]"]
@@ -468,7 +476,7 @@ with col_persona:
             if new_persona_name.strip() and new_persona_name.strip() not in current_personas:
                 current_personas.append(new_persona_name.strip())
                 proj_data["personas"] = current_personas
-                projects_map[active_project] = proj_data
+                projects_dict[active_project] = proj_data
                 st.session_state.selected_persona_name = new_persona_name.strip()
                 save_memories(store)
                 st.rerun()
@@ -485,7 +493,7 @@ with col_persona:
                     idx = current_personas.index(target_to_edit)
                     current_personas[idx] = edited_name.strip()
                     proj_data["personas"] = current_personas
-                    projects_map[active_project] = proj_data
+                    projects_dict[active_project] = proj_data
                     st.session_state.selected_persona_name = edited_name.strip()
                     save_memories(store)
                     st.rerun()
@@ -508,7 +516,7 @@ with col_persona:
                 if st.button("Yes, Confirm Delete", type="primary"):
                     current_personas.remove(target_to_delete)
                     proj_data["personas"] = current_personas
-                    projects_map[active_project] = proj_data
+                    projects_dict[active_project] = proj_data
                     st.session_state.selected_persona_name = current_personas[0]
                     save_memories(store)
                     st.rerun()
@@ -524,15 +532,15 @@ with col_persona:
 # Visual Metric Badge Bar
 inv_count = len(proj_data.get("invariants", []))
 persona_count = len(proj_data.get("personas", []))
-boundary_count = len(proj_data.get("boundaries", []))
 search_count = len(proj_data.get("learned_search_knowledge", []))
+global_rule_lines = [l for l in store.get("global_boundaries", "").splitlines() if l.strip()]
 
 st.markdown(f"""
 <div style="margin-bottom: 16px;">
     <span class="metric-pill">📌 Active: <strong>{active_project}</strong></span>
     <span class="metric-pill">👤 Persona: <strong>{active_persona}</strong></span>
     <span class="metric-pill">🧠 {inv_count} Stored Invariants</span>
-    <span class="metric-pill">🛡️ {boundary_count} Guardrail Boundaries</span>
+    <span class="metric-pill">🛡️ {len(global_rule_lines)} Global Guardrails</span>
     <span class="metric-pill">👥 {persona_count} Personas</span>
     <span class="metric-pill">🌐 {search_count} Search Learnings</span>
 </div>
@@ -596,16 +604,22 @@ with tab_ingest:
         if not raw_input.strip():
             st.warning("Please paste scenario text first.")
         else:
-            parsed_title, steps, learned = extract_steps_and_learn(raw_input, active_project, active_persona)
+            prev_invs = set(projects_dict.get(active_project, {}).get("invariants", []))
+            formatted = ingest_raw_gemini_text(raw_input, active_project, target_wit)
+            parsed_title, steps, _ = extract_steps_and_learn(raw_input, active_project, active_persona)
             tcm_xml = convert_to_tcm_xml(steps)
-            desc_html = f"<h3>Scope & Verification</h3><p>Scenario authored for <strong>{active_project}</strong> under role <strong>{active_persona}</strong>.</p>"
-            
+
+            # Reload updated memory saved by ingest_raw_gemini_text / extract_steps_and_learn
+            st.session_state.memories = load_memories()
+            updated_invs = set(st.session_state.memories["projects"].get(active_project, {}).get("invariants", []))
+            learned = list(updated_invs - prev_invs)
+
             st.session_state.last_learning_delta = {"added_invariants": learned}
             st.session_state.last_parsed = {
-                "title": parsed_title,
+                "title": formatted.get("title", parsed_title),
                 "wit": target_wit,
-                "desc_html": desc_html,
-                "tcm_xml": tcm_xml,
+                "desc_html": formatted.get("field_1_content", ""),
+                "tcm_xml": tcm_xml if tcm_xml else formatted.get("field_2_content", ""),
                 "steps_count": len(steps)
             }
             st.rerun()
@@ -620,8 +634,8 @@ with tab_ingest:
             st.markdown("**Field 1: Description / Scope (HTML)**")
             st.markdown(f'<div class="code-display">{item["desc_html"]}</div>', unsafe_allow_html=True)
         with c2:
-            st.markdown(f"**Field 2: Native Steps (TCM XML - {item['steps_count']} steps)**")
-            disp_xml = item["tcm_xml"] if item["tcm_xml"] else "(No CSV steps formatted)"
+            st.markdown(f"**Field 2: Native Steps / Content ({item['steps_count']} parsed CSV steps)**")
+            disp_xml = item["tcm_xml"] if item["tcm_xml"] else "(No steps formatted)"
             st.markdown(f'<div class="code-display">{disp_xml}</div>', unsafe_allow_html=True)
 
         if st.button(f"🚀 Publish Directly to Azure DevOps ({item['wit']})", type="primary", use_container_width=True, key="btn_publish_ingest"):
@@ -636,7 +650,7 @@ with tab_ingest:
                         wit_type=item["wit"],
                         title=item["title"],
                         description_html=item["desc_html"],
-                        tcm_xml=item["tcm_xml"]
+                        tcm_xml=item["tcm_xml"] if item["steps_count"] > 0 else ""
                     )
                     if success:
                         st.success(msg)
@@ -648,7 +662,7 @@ with tab_ingest:
 # ---------------------------------------------------------
 with tab_gen:
     st.markdown("### Generative Ticket Authoring & Search Grounding")
-    st.caption("Generate complete work items grounded with real-time web intelligence, learned project memory, and active guardrail boundaries.")
+    st.caption("Generate complete work items grounded with DomainBrain memory, global zero-leakage guardrails, and live web intelligence.")
 
     col_req, col_gen_ctrl = st.columns([2, 1])
     with col_req:
@@ -677,66 +691,48 @@ with tab_gen:
             st.image(uploaded_img, caption="Staged Visual Evidence", use_column_width=True)
 
     if st.button("🚀 Generate Ticket with Memory & Grounding", type="primary", use_container_width=True):
-        if not gen_prompt.strip():
-            st.warning("Please provide feature or defect context.")
+        if not gen_prompt.strip() and not uploaded_img:
+            st.warning("Please provide feature context or upload a screenshot.")
         elif not gemini_key_input:
             st.error("Please provide a Gemini API Key in the left sidebar to use in-app generation.")
         else:
-            with st.spinner("Authoring ticket with project invariants, guardrails, and search grounding..."):
+            with st.spinner("DomainBrain analyzing project memory, global guardrails, and generating ticket..."):
                 try:
-                    mem_invariants = proj_data.get("invariants", [])
-                    invariants_text = "\n".join([f"- {inv}" for inv in mem_invariants])
-                    
-                    mem_boundaries = proj_data.get("boundaries", [])
-                    boundaries_text = "\n".join([f"- {b['title']}: {b['rule']}" for b in mem_boundaries])
-                    
-                    system_rules = f"""You are the Lead QA Architect for {active_project}.
-Active Persona: {active_persona}
+                    prev_invs = set(projects_dict.get(active_project, {}).get("invariants", []))
+                    img_list = [Image.open(uploaded_img)] if uploaded_img else None
 
-Learned Project Rules & Invariants:
-{invariants_text}
+                    brain = DomainBrain()
+                    result_json = brain.think_hybrid(
+                        requirement=f"[Active Persona: {active_persona}]\n{gen_prompt}",
+                        project_name=active_project,
+                        mode=gen_wit,
+                        images=img_list,
+                        boundaries=store.get("global_boundaries", ""),
+                        enable_web_search=use_search_grounding
+                    )
 
-Enforced Guardrail Boundaries:
-{boundaries_text}
+                    # Reload updated memories saved by DomainBrain
+                    st.session_state.memories = load_memories()
+                    updated_invs = set(st.session_state.memories["projects"].get(active_project, {}).get("invariants", []))
+                    learned = list(updated_invs - prev_invs)
 
-Output format:
-Title: <Actionable Title>
-Step #,Action,Expected Result
-1,<Action>,"<Expected Result>"
-"""
-                    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={gemini_key_input}"
-                    
-                    tools_payload = []
-                    if use_search_grounding:
-                        tools_payload.append({"google_search": {}})
+                    formatted_azure = format_for_azure_clipboard(result_json, gen_wit)
+                    scenarios = result_json.get("adversarial_edge_cases_and_test_scenarios", [])
+                    tcm_steps = [
+                        {"action": sc.get("action", ""), "expected": sc.get("expected_behavior", "")}
+                        for sc in scenarios
+                    ]
+                    tcm_xml = convert_to_tcm_xml(tcm_steps)
 
-                    req_body = {
-                        "contents": [
-                            {"role": "user", "parts": [{"text": f"{system_rules}\n\nUser Request:\n{gen_prompt}"}]}
-                        ]
+                    st.session_state.last_learning_delta = {"added_invariants": learned}
+                    st.session_state.last_parsed = {
+                        "title": formatted_azure.get("title", f"[{gen_wit}] {active_project}"),
+                        "wit": gen_wit,
+                        "desc_html": formatted_azure.get("field_1_content", ""),
+                        "tcm_xml": tcm_xml if (gen_wit == "Test Case" and tcm_xml) else formatted_azure.get("field_2_content", ""),
+                        "steps_count": len(tcm_steps)
                     }
-                    if tools_payload:
-                        req_body["tools"] = tools_payload
-
-                    api_res = requests.post(endpoint, json=req_body, timeout=30)
-                    if api_res.status_code == 200:
-                        gen_text = api_res.json()["candidates"][0]["content"]["parts"][0]["text"]
-                        
-                        parsed_title, steps, learned = extract_steps_and_learn(gen_text, active_project, active_persona)
-                        tcm_xml = convert_to_tcm_xml(steps)
-                        desc_html = f"<h3>Scope & Preconditions</h3><p>Generated for <strong>{active_project}</strong> ({active_persona}). Grounded: {use_search_grounding}</p>"
-
-                        st.session_state.last_learning_delta = {"added_invariants": learned}
-                        st.session_state.last_parsed = {
-                            "title": parsed_title,
-                            "wit": gen_wit,
-                            "desc_html": desc_html,
-                            "tcm_xml": tcm_xml,
-                            "steps_count": len(steps)
-                        }
-                        st.success("Ticket generated! Switch to Tab 1 to review and publish to Azure DevOps.")
-                    else:
-                        st.error(f"Generation error ({api_res.status_code}): {api_res.text}")
+                    st.success("Ticket generated! Switch to Tab 1 to review and publish to Azure DevOps.")
                 except Exception as e:
                     st.error(f"Generation failed: {str(e)}")
 
@@ -745,7 +741,7 @@ Step #,Action,Expected Result
 # ---------------------------------------------------------
 with tab_kb:
     st.markdown(f"### 🧠 Stored Knowledge for `{active_project}`")
-    mem = projects_map.get(active_project, {})
+    mem = projects_dict.get(active_project, {})
     
     st.markdown(f"**Architecture Summary:** {mem.get('summary', 'Standard enterprise architecture.')}")
     
@@ -771,49 +767,26 @@ with tab_kb:
         for inv in invariants:
             st.markdown(f"- {inv}")
     else:
-        st.info("No invariants recorded yet. Ingest scenarios to automatically absorb rules.")
+        st.info("No invariants recorded yet. Ingest or generate scenarios to automatically absorb rules.")
 
 # ---------------------------------------------------------
-# TAB 4: Interactive Boundary Conditions & Guardrails
+# TAB 4: Global Boundary Conditions & Guardrails
 # ---------------------------------------------------------
 with tab_boundary:
-    st.markdown(f"### ⚙️ Boundary Conditions & Guardrails for `{active_project}`")
-    st.caption("Active boundary definitions that enforce role separation, tenant limits, and validation rules.")
-    
-    proj_boundaries = proj_data.get("boundaries", [])
-    
-    if proj_boundaries:
-        for idx, b in enumerate(proj_boundaries):
-            col_b_text, col_b_del = st.columns([0.92, 0.08])
-            with col_b_text:
-                st.markdown(f"- **{b.get('title', 'Rule')}:** {b.get('rule', '')}")
-            with col_b_del:
-                if st.button("🗑️", key=f"del_boundary_{active_project}_{idx}", help="Remove boundary guardrail"):
-                    proj_boundaries.pop(idx)
-                    proj_data["boundaries"] = proj_boundaries
-                    projects_map[active_project] = proj_data
-                    save_memories(store)
-                    st.rerun()
-    else:
-        st.info("No custom boundary conditions defined for this project yet.")
+    st.markdown("### ⚙️ Global Guardrails & Boundary Conditions (All Projects)")
+    st.caption("Common security, privacy, and one-way learning boundaries enforced across all projects. Edit or append bullet points directly below.")
 
-    st.markdown("---")
-    with st.form(key=f"add_boundary_form_{active_project}", clear_on_submit=True):
-        st.markdown("#### ➕ Add New Guardrail Boundary")
-        new_b_title = st.text_input("Guardrail Title / Category", placeholder="e.g., API Rate Limits, Tenant Isolation, Payment Validation")
-        new_b_rule = st.text_area("Boundary Condition / Enforcement Rule", placeholder="e.g., Standard users must receive HTTP 403 when accessing cross-tenant zip endpoints.")
-        submitted_b = st.form_submit_button("💾 Save Guardrail to Project", type="primary")
-        
-        if submitted_b:
-            if new_b_title.strip() and new_b_rule.strip():
-                proj_boundaries.append({
-                    "title": new_b_title.strip(),
-                    "rule": new_b_rule.strip()
-                })
-                proj_data["boundaries"] = proj_boundaries
-                projects_map[active_project] = proj_data
-                save_memories(store)
-                st.success(f"Guardrail '{new_b_title.strip()}' saved!")
-                st.rerun()
-            else:
-                st.warning("Please fill in both the Guardrail Title and Boundary Condition.")
+    current_global_boundaries = store.get("global_boundaries", "")
+
+    updated_boundaries = st.text_area(
+        "Global Guardrail Rules (Bullet Points)",
+        value=current_global_boundaries,
+        height=280,
+        placeholder="- Enter guardrail rules as bullet points...\n- Another rule..."
+    )
+
+    if st.button("💾 Save Global Guardrails", type="primary"):
+        store["global_boundaries"] = updated_boundaries.strip()
+        save_memories(store)
+        st.success("Global guardrails saved and applied across all projects!")
+        st.rerun()

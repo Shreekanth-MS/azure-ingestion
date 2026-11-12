@@ -1,5 +1,6 @@
 {
   "active_project": "New Project",
+  "global_boundaries": "- Zero Outbound Data Leakage: Strictly prohibit transmitting, exposing, or echoing proprietary schemas, internal API endpoints, tenant IDs, PII, or project memory contents to external web search queries or third-party endpoints.\n- One-Way Inbound Learning Only: Absorb rules, edge cases, and domain patterns from external user-provided inputs, pasted text, and uploaded screenshots, but never use internal project memory as outbound search context.\n- Sanitized Search Query Isolation: When Live Google Search Grounding is active, outbound search queries must contain only generic public industry standards, protocols, or framework terms—never project names, client names, or internal business logic.\n- Visual Context Air-Gap: Whenever UI screenshots or visual artifacts are uploaded, external web search grounding must be completely disabled so analysis relies 100% on local visual data and stored project memory.",
   "projects": {
     "New Project": {
       "summary": "Initial architecture workspace. Multi-tab workflows, role boundaries, and end-to-end business lifecycles.",
@@ -13,20 +14,6 @@
         "Super Admin",
         "System Admin",
         "Standard User"
-      ],
-      "boundaries": [
-        {
-          "title": "Authentication Limits",
-          "rule": "Impersonation tokens expire upon session close or navigation away from tenant portal."
-        },
-        {
-          "title": "RBAC Boundaries",
-          "rule": "Standard users attempting administrative endpoints must trigger HTTP 403 Forbidden redirects."
-        },
-        {
-          "title": "Data Persistence",
-          "rule": "Form drafts across multi-tab workflows must retain dirty-state flags until explicit submission or cancellation."
-        }
       ],
       "learned_search_knowledge": []
     }
