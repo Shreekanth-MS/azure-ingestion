@@ -13,9 +13,10 @@ from google.genai import types
 
 load_dotenv(override=True)
 
-PROJECTS_FILE = "projects_memory.json"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECTS_FILE = os.path.join(BASE_DIR, "projects_memory.json")
 
-# All 7 supported Azure DevOps Work Item types
+# All 7 supported Azure DevOps Work Item types[cite: 13]
 ALL_AZURE_WITS = [
     "Bug",
     "Epic",
@@ -28,44 +29,58 @@ ALL_AZURE_WITS = [
 
 
 # ----------------------------------------------------------------------
-# 1. PERSISTENT MULTI-PROJECT MEMORY
+# 1. PERSISTENT MULTI-PROJECT MEMORY[cite: 13]
 # ----------------------------------------------------------------------
-def load_project_memories() -> dict:
-    """Loads long-term project knowledge and invariants."""
+def _read_raw_store() -> dict:
+    """Reads the full memory store, auto-migrating flat schemas if present[cite: 13, 14]."""
     if os.path.exists(PROJECTS_FILE):
         try:
             with open(PROJECTS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict) and data:
-                    return data
+                    if "projects" in data:
+                        return data
+                    return {"active_project": list(data.keys())[0], "projects": data}
         except Exception:
             pass
     return {
-        "New Project": {
-            "summary": "Enterprise multi-tenant cloud application workspace.",
-            "invariants": ["Tenant isolation and role-based permissions must be enforced."],
-            "personas": ["Super Admin", "Standard User"],
-            "learned_search_knowledge": []
+        "active_project": "New Project",
+        "projects": {
+            "New Project": {
+                "summary": "Enterprise multi-tenant cloud application workspace.",
+                "invariants": ["Tenant isolation and role-based permissions must be enforced."],
+                "personas": ["Super Admin", "Standard User"],
+                "boundaries": [],
+                "learned_search_knowledge": []
+            }
         }
     }
 
 
+def load_project_memories() -> dict:
+    """Loads long-term project knowledge and invariants[cite: 13]."""
+    return _read_raw_store().get("projects", {})
+
+
 def register_new_project(project_name: str) -> dict:
-    """Explicitly creates and persists a new project profile immediately."""
+    """Explicitly creates and persists a new project profile immediately[cite: 13]."""
     clean_name = project_name.strip()
-    memories = load_project_memories()
+    store = _read_raw_store()
+    memories = store["projects"]
     if clean_name not in memories:
         memories[clean_name] = {
             "summary": f"Enterprise architecture and QA workspace for {clean_name}.",
             "invariants": [],
-            "personas": [],
+            "personas": ["Super Admin", "Standard User"],
+            "boundaries": [],
             "learned_search_knowledge": []
         }
-        try:
-            with open(PROJECTS_FILE, "w", encoding="utf-8") as f:
-                json.dump(memories, f, indent=2)
-        except Exception as e:
-            print(f"Warning: Could not write project memory: {e}")
+    store["active_project"] = clean_name
+    try:
+        with open(PROJECTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(store, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not write project memory: {e}")
     return memories
 
 
@@ -76,13 +91,15 @@ def save_project_memory(
     new_personas: list[str],
     new_search_learnings: list[str] = None
 ):
-    """Appends discovered invariants, personas, and web search discoveries to the project profile."""
-    memories = load_project_memories()
+    """Appends discovered invariants, personas, and web search discoveries to the project profile[cite: 13]."""
+    store = _read_raw_store()
+    memories = store["projects"]
     if project_name not in memories:
         memories[project_name] = {
             "summary": new_summary,
             "invariants": [],
             "personas": [],
+            "boundaries": [],
             "learned_search_knowledge": []
         }
 
@@ -101,19 +118,20 @@ def save_project_memory(
     existing["learned_search_knowledge"] = combined_search_learnings[-20:]
 
     memories[project_name] = existing
+    store["active_project"] = project_name
 
     try:
         with open(PROJECTS_FILE, "w", encoding="utf-8") as f:
-            json.dump(memories, f, indent=2)
+            json.dump(store, f, indent=2)
     except Exception as e:
         print(f"Warning: Could not persist project memory: {e}")
 
 
 # ----------------------------------------------------------------------
-# 2. SANITIZATION & AZURE FORMATTING
+# 2. SANITIZATION & AZURE FORMATTING[cite: 13]
 # ----------------------------------------------------------------------
 def sanitize_input(text: str) -> str:
-    """Masks emails, internal IP addresses, API secrets, and DB connection strings."""
+    """Masks emails, internal IP addresses, API secrets, and DB connection strings[cite: 13]."""
     if not text:
         return ""
     text = re.sub(r'[\w\.-]+@[\w\.-]+\.\w+', '[REDACTED_EMAIL]', text)
@@ -124,7 +142,7 @@ def sanitize_input(text: str) -> str:
 
 
 def format_for_azure_clipboard(ticket_data: dict, work_item_type: str) -> dict:
-    """Formats JSON output into Azure DevOps-compatible HTML blocks for clean copy-pasting."""
+    """Formats JSON output into Azure DevOps-compatible HTML blocks for clean copy-pasting[cite: 13]."""
     title = ticket_data.get("title_suggestion", "Architectural Requirement")
     arch_summary = ticket_data.get("architecture_summary", "")
     invariants = ticket_data.get("system_invariants", [])
@@ -251,7 +269,7 @@ def format_for_azure_clipboard(ticket_data: dict, work_item_type: str) -> dict:
 
 
 def ingest_raw_gemini_text(raw_text: str, project_name: str, work_item_type: str = "Test Case") -> dict:
-    """Parses unstructured text or JSON pasted directly from a Gemini web session."""
+    """Parses unstructured text or JSON pasted directly from a Gemini web session[cite: 13]."""
     clean_text = raw_text.strip()
 
     parsed_json = None
@@ -310,7 +328,7 @@ def ingest_raw_gemini_text(raw_text: str, project_name: str, work_item_type: str
 
 
 # ----------------------------------------------------------------------
-# 3. AZURE DEVOPS REST API INTEGRATION
+# 3. AZURE DEVOPS REST API INTEGRATION[cite: 13]
 # ----------------------------------------------------------------------
 def get_azure_auth_headers(pat: str) -> dict:
     b64_pat = base64.b64encode(f":{pat}".encode("utf-8")).decode("utf-8")
@@ -321,7 +339,7 @@ def get_azure_auth_headers(pat: str) -> dict:
 
 
 def fetch_azure_projects(org_name: str, pat: str) -> list[str]:
-    """Retrieves list of project names accessible by the given Azure PAT."""
+    """Retrieves list of project names accessible by the given Azure PAT[cite: 13]."""
     clean_org = org_name.strip().rstrip("/").split("/")[-1]
     url = f"https://dev.azure.com/{clean_org}/_apis/projects?api-version=7.1-preview.4"
     try:
@@ -346,7 +364,7 @@ def create_azure_work_item(
     field_2_content: str,
     pat: str
 ) -> dict:
-    """Creates a work item across all 7 types via REST API and returns item ID and web URL."""
+    """Creates a work item across all 7 types via REST API and returns item ID and web URL[cite: 13]."""
     clean_org = org_name.strip().rstrip("/").split("/")[-1]
     wit_clean = work_item_type.replace(" ", "%20")
     url = f"https://dev.azure.com/{clean_org}/{project}/_apis/wit/workitems/${wit_clean}?api-version=7.1"
@@ -387,7 +405,7 @@ def create_azure_work_item(
 
 
 # ----------------------------------------------------------------------
-# 4. KEY ROTATOR & GEMINI ENGINE
+# 4. KEY ROTATOR & GEMINI ENGINE[cite: 13]
 # ----------------------------------------------------------------------
 class KeyRotator:
     def __init__(self, keys: list[str]):
@@ -444,6 +462,12 @@ class DomainBrain:
         known_personas = ", ".join(proj_mem.get("personas", []))
         known_search = "\n- ".join(proj_mem.get("learned_search_knowledge", []))
 
+        # Merge stored project boundaries with any passed-in boundary rules[cite: 13, 14]
+        saved_boundaries = "\n".join(
+            [f"- {b.get('title', 'Rule')}: {b.get('rule', '')}" for b in proj_mem.get("boundaries", [])]
+        )
+        all_boundaries = f"{saved_boundaries}\n{clean_boundaries}".strip()
+
         memory_context = f"""
 INTERNAL BRAIN MEMORY FOR PROJECT [{project_name}]:
 - Architecture Summary: {known_summary}
@@ -480,7 +504,7 @@ TARGET ARTIFACT: {mode}
 {search_instruction}
 
 NEGATIVE BOUNDARIES & INVARIANTS:
-{clean_boundaries}
+{all_boundaries}
 
 INSTRUCTIONS:
 1. Brain First: Treat project memory and inputs as the single source of truth.

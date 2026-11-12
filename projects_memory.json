@@ -1,17 +1,34 @@
 {
-  "New Project": {
-    "summary": "Initial architecture workspace. Multi-tab workflows, role boundaries, and end-to-end business lifecycles.",
-    "invariants": [
-      "Macroscopic big-picture view: omit trivial micro-interaction click steps.",
-      "Consolidate multiple related tabs into a single unified end-to-end lifecycle scenario.",
-      "Strict RBAC validation: isolate permissions across administrative and standard roles.",
-      "Cross-tab state persistence: ensure upstream modifications propagate without data loss."
-    ],
-    "personas": [
-      "Super Admin",
-      "System Admin",
-      "Standard User"
-    ],
-    "learned_search_knowledge": []
+  "active_project": "New Project",
+  "projects": {
+    "New Project": {
+      "summary": "Initial architecture workspace. Multi-tab workflows, role boundaries, and end-to-end business lifecycles.",
+      "invariants": [
+        "Macroscopic big-picture view: omit trivial micro-interaction click steps.",
+        "Consolidate multiple related tabs into a single unified end-to-end lifecycle scenario.",
+        "Strict RBAC validation: isolate permissions across administrative and standard roles.",
+        "Cross-tab state persistence: ensure upstream modifications propagate without data loss."
+      ],
+      "personas": [
+        "Super Admin",
+        "System Admin",
+        "Standard User"
+      ],
+      "boundaries": [
+        {
+          "title": "Authentication Limits",
+          "rule": "Impersonation tokens expire upon session close or navigation away from tenant portal."
+        },
+        {
+          "title": "RBAC Boundaries",
+          "rule": "Standard users attempting administrative endpoints must trigger HTTP 403 Forbidden redirects."
+        },
+        {
+          "title": "Data Persistence",
+          "rule": "Form drafts across multi-tab workflows must retain dirty-state flags until explicit submission or cancellation."
+        }
+      ],
+      "learned_search_knowledge": []
+    }
   }
 }
